@@ -83,6 +83,7 @@ class TestChatSessionBasic:
         ok = session.run_round("look around")
         assert ok
         assert session.total_steps == 2
+        assert session.total_tool_calls == 1
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,21 @@ class TestHistoryPersistence:
 
         session._shared_history.clear_except_first()
         assert len(session._shared_history) == 1
+
+    def test_clear_session_resets_history_and_stats(self, tmp_path, cfg, registry):
+        script = [
+            Action(ActionType.TOOL_CALL, "explore", ToolCall("shell", {"cmd": "ls"})),
+            Action(ActionType.FINISH, "done", message="ok"),
+        ]
+        session = make_session(MockBackend(script), registry, cfg, tmp_path)
+        session.run_round("task 1")
+
+        session.clear_session()
+
+        assert session.round_count == 0
+        assert session.total_steps == 0
+        assert session.total_tool_calls == 0
+        assert len(session._shared_history) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -52,6 +53,32 @@ def cyan(t: str) -> str:   return _c(t, "36")
 def bold(t: str) -> str:   return _c(t, "1")
 def dim(t: str) -> str:    return _c(t, "2")
 def magenta(t: str) -> str: return _c(t, "35")
+
+
+def load_task_text(task: str | None, task_file: str | None) -> str:
+    """Load task text from either --task or --task-file."""
+    if task and task_file:
+        click.echo(red("[ERROR] provide either --task or --task-file, not both"), err=True)
+        raise SystemExit(1)
+
+    if task:
+        return task
+
+    if not task_file:
+        click.echo(red("[ERROR] provide --task or --task-file"), err=True)
+        raise SystemExit(1)
+
+    path = Path(task_file)
+    if not path.exists():
+        click.echo(red(f"[ERROR] task file does not exist: {path}"), err=True)
+        raise SystemExit(1)
+
+    description = path.read_text(encoding="utf-8").strip()
+    if not description:
+        click.echo(red(f"[ERROR] task file is empty: {path}"), err=True)
+        raise SystemExit(1)
+
+    return description
 
 
 # ---------------------------------------------------------------------------
@@ -173,29 +200,36 @@ def _print_step(event) -> None:
 def _print_log_summary(path: Path) -> None:
     from agent.event_log import EventLog, build_execution_trace, summarize_run
 
-    with EventLog.open_existing(path) as elog:
-        stats = summarize_run(elog)
-        trace = build_execution_trace(elog)
+    try:
+        with EventLog.open_existing(path) as elog:
+            stats = summarize_run(elog)
+            trace = build_execution_trace(elog)
+    except Exception as e:
+        click.echo(red(f"[ERROR] failed to read log file: {path}"), err=True)
+        click.echo(red(f"[ERROR] {e}"), err=True)
+        raise SystemExit(1)
 
     click.echo(bold(f"\nEvent Log: {path.name}"))
-    click.echo(f"  Task id      : {trace['task_id']}")
-    click.echo(f"  Start        : {trace['start_time'] or 'unknown'}")
-    click.echo(f"  End          : {trace['end_time'] or 'unknown'}")
-    click.echo(f"  Duration     : {trace['duration_seconds'] if trace['duration_seconds'] is not None else 'unknown'}")
-    click.echo(f"  Provider     : {trace['provider']}")
-    click.echo(f"  Model        : {trace['model']}")
-    click.echo(f"  Actions      : {stats['actions']}")
-    click.echo(f"  Reflections  : {stats['reflections']}")
-    click.echo(f"  Tool calls   : {stats['tool_calls']}")
-    click.echo(f"  Final status : {trace['final_status'] or stats['final_status']}")
+    click.echo(f"  Task id          : {trace['task_id']}")
+    click.echo(f"  Total events     : {stats['total_events']}")
+    click.echo(f"  Actions          : {stats['actions']}")
+    click.echo(f"  Observations     : {stats['observations_ok'] + stats['observations_err']}")
+    click.echo(f"  Reflections      : {stats['reflections']}")
+    click.echo(f"  Tool calls       : {stats['tool_calls']}")
+    click.echo(f"  Final status     : {trace['final_status'] or stats['final_status']}")
+    click.echo(f"  Start            : {trace['start_time'] or 'unknown'}")
+    click.echo(f"  End              : {trace['end_time'] or 'unknown'}")
+    click.echo(f"  Duration         : {trace['duration_seconds'] if trace['duration_seconds'] is not None else 'unknown'}")
+    click.echo(f"  Provider         : {trace['provider']}")
+    click.echo(f"  Model            : {trace['model']}")
     if trace["final_summary"]:
-        click.echo(f"  Summary      : {trace['final_summary']}")
+        click.echo(f"  Summary          : {trace['final_summary']}")
     if trace["final_error"]:
-        click.echo(f"  Error        : {trace['final_error']}")
+        click.echo(f"  Error            : {trace['final_error']}")
     if trace["modified_files"]:
-        click.echo(f"  Modified     : {', '.join(trace['modified_files'])}")
+        click.echo(f"  Modified         : {', '.join(trace['modified_files'])}")
     if trace["test_runs"]:
-        click.echo(f"  Tests        : {', '.join(t['summary'] for t in trace['test_runs'])}")
+        click.echo(f"  Tests            : {', '.join(t['summary'] for t in trace['test_runs'])}")
     click.echo()
 
 
@@ -260,13 +294,7 @@ def run(
     )
 
     # 解析任务描述
-    if task_file:
-        description = Path(task_file).read_text(encoding="utf-8").strip()
-    elif task:
-        description = task
-    else:
-        click.echo(red("[ERROR] provide --task or --task-file"), err=True)
-        sys.exit(1)
+    description = load_task_text(task, task_file)
 
     repo_path = Path(repo).resolve()
     if not repo_path.exists():
@@ -384,6 +412,8 @@ def run(
 @click.option("--model", "-m", default=None, help="Override LLM model name")
 @click.option("--provider", "-p", default=None, help="Override LLM provider")
 @click.option("--max-steps", default=None, type=int, help="Max steps per round")
+@click.option("--stream/--no-stream", default=True, help="Enable streaming output")
+@click.option("--confirm", is_flag=True, default=False, help="Ask confirmation before running dangerous shell commands")
 @click.option("--sandbox", is_flag=True, default=False, help="Run commands in Docker sandbox (requires Docker)")
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs")
 @click.pass_context
@@ -393,6 +423,8 @@ def chat(
     model: str | None,
     provider: str | None,
     max_steps: int | None,
+    stream: bool,
+    confirm: bool,
     sandbox: bool,
     verbose: bool,
 ) -> None:
@@ -419,7 +451,7 @@ def chat(
             config,
             repo_path=str(repo_path),
             sandbox=sandbox,
-            confirm=False,
+            confirm=confirm,
             chat_mode=True,
         )
     except ValueError as e:
@@ -438,6 +470,7 @@ def chat(
         config=config,
         repo_path=str(repo_path),
         log_dir=config.agent.log_dir,
+        stream=stream,
         confirm_callback=confirm_callback,   # chat 模式默认开启确认
     )
 
@@ -500,8 +533,8 @@ def chat(
             elif cmd == "/stats":
                 session.print_stats()
             elif cmd == "/clear":
-                session._shared_history.clear_except_first()
-                click.echo(dim("  History cleared (kept initial context)."))
+                session.clear_session()
+                click.echo(dim("  Session cleared."))
             elif cmd == "/help":
                 click.echo(dim(
                     "  Commands:\n"
@@ -563,8 +596,13 @@ def log_replay(log_file: str) -> None:
         click.echo(red(f"[ERROR] File not found: {path}"), err=True)
         sys.exit(1)
 
-    with EventLog.open_existing(path) as elog:
-        lines = render_replay_lines(elog)
+    try:
+        with EventLog.open_existing(path) as elog:
+            lines = render_replay_lines(elog)
+    except Exception as e:
+        click.echo(red(f"[ERROR] failed to replay log file: {path}"), err=True)
+        click.echo(red(f"[ERROR] {e}"), err=True)
+        sys.exit(1)
 
     click.echo()
     for line in lines:
@@ -591,6 +629,7 @@ def log_list(log_dir: str) -> None:
     click.echo(bold(f"\nLog files in {log_path}:\n"))
     for f in files:
         size_kb = f.stat().st_size / 1024
+        modified_time = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         final_status = "unknown"
         try:
             with EventLog.open_existing(f) as elog:
@@ -598,7 +637,7 @@ def log_list(log_dir: str) -> None:
             final_status = trace["final_status"] or "unknown"
         except Exception:
             final_status = "unknown"
-        click.echo(f"  {f.name}  ({size_kb:.1f} KB)  status={final_status}")
+        click.echo(f"  {f.name}  ({size_kb:.1f} KB)  modified={modified_time}  status={final_status}")
     click.echo()
 
 

@@ -162,7 +162,10 @@ class ShellTool(BaseTool):
         return self._run(cmd, timeout, cwd)
 
     def _run(self, cmd: str, timeout: int, cwd: str | None) -> ToolResult:
-        result = self._runtime.exec(cmd, cwd=cwd, timeout=timeout)
+        try:
+            result = self._runtime.exec(cmd, cwd=cwd, timeout=timeout)
+        except Exception as exc:
+            return ToolResult(success=False, output="", error=str(exc))
         output = _truncate(result.output, MAX_OUTPUT_CHARS)
         if not result.success:
             if "timed out" in result.stderr.lower():

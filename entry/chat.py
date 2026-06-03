@@ -69,6 +69,7 @@ def _print_event_live(event) -> None:
             # 流式时 thought 已打印，只需换行；非流式时完整打印
             import sys
             sys.stdout.write("\n")   # 确保工具调用从新行开始
+            sys.stdout.write(text)
             sys.stdout.flush()
 
         if tc:
@@ -167,7 +168,7 @@ class ChatSession:
     - repo_map 缓存（换 repo 时自动失效）
     """
 
-    def __init__(self, backend, registry, config, repo_path: str, log_dir: str, confirm_callback=None) -> None:
+    def __init__(self, backend, registry, config, repo_path: str, log_dir: str, confirm_callback=None, stream: bool = True) -> None:
         from agent.core import Agent, AgentConfig
         from context.history import ConversationHistory
 
@@ -175,6 +176,7 @@ class ChatSession:
         self.log_dir = log_dir
         self.config = config
         self._confirm_callback = confirm_callback
+        self._stream = stream
 
         # 流式回调：每个 token 立刻 flush 到终端
         _stream_started = [False]
@@ -216,9 +218,9 @@ class ChatSession:
             history_max_messages=config.context.history_window * 2,
             llm_max_retries=3,
             llm_retry_delay=1.0,
-            stream=True,
-            stream_callback=_stream_cb,
-            thought_callback=_thought_cb,
+            stream=stream,
+            stream_callback=_stream_cb if stream else None,
+            thought_callback=_thought_cb if stream else None,
             confirm_dangerous=confirm_callback is not None,
             confirm_callback=confirm_callback,
         )
@@ -231,6 +233,8 @@ class ChatSession:
         self.total_tokens = 0
         self.total_steps = 0
         self.round_count = 0
+        self.total_tool_calls = 0
+        self._session_started_at = time.time()
 
     def run_round(self, user_input: str) -> bool:
         """
@@ -268,10 +272,13 @@ class ChatSession:
         with EventLog.create(task, log_dir=self.log_dir) as log:
             # 实时打印：每条 event 写入后立刻 echo
             result = self._run_with_live_print(task, log)
+            from agent.event_log import summarize_run
+            stats = summarize_run(log)
 
         elapsed = time.time() - t0
         self.total_tokens += result.total_tokens
         self.total_steps += result.steps_taken
+        self.total_tool_calls += sum(stats["tool_calls"].values())
 
         # 把 agent 这轮的最后回复追加到共享 history
         # 这样下一轮 agent 能看到自己上一轮说了什么
@@ -283,14 +290,15 @@ class ChatSession:
 
         # 流式输出结束后打换行，重置 readline 的行状态
         import sys as _sys
-        _sys.stdout.write("\n")
-        _sys.stdout.flush()
+        if self._stream:
+            _sys.stdout.write("\n")
+            _sys.stdout.flush()
 
         # 打印轮次统计
         click.echo(dim(
             f"  --- Round {self.round_count} | "
             f"{result.steps_taken} steps | "
-            f"{result.total_tokens:,} tokens | "
+            f"status={result.status.value} | "
             f"{elapsed:.1f}s ---"
         ))
 
@@ -355,3 +363,116 @@ class ChatSession:
         click.echo(f"    Steps   : {self.total_steps}")
         click.echo(f"    Tokens  : {self.total_tokens:,}")
         click.echo(bold(f"{'-'*50}\n"))
+
+
+def _chat_session_print_stats(self) -> None:
+    elapsed = time.time() - self._session_started_at
+    click.echo(bold(f"\n{'-'*50}"))
+    click.echo("  Session stats:")
+    click.echo(f"    Rounds  : {self.round_count}")
+    click.echo(f"    Steps   : {self.total_steps}")
+    click.echo(f"    Tool calls : {self.total_tool_calls}")
+    click.echo(f"    Elapsed : {elapsed:.1f}s")
+    if self.total_tokens:
+        click.echo(f"    Tokens  : {self.total_tokens:,}")
+    click.echo(bold(f"{'-'*50}\n"))
+
+
+def _chat_session_clear(self) -> None:
+    from context.history import ConversationHistory
+
+    self._shared_history = ConversationHistory(
+        max_messages=self.config.context.history_window * 2
+    )
+    self.total_tokens = 0
+    self.total_steps = 0
+    self.round_count = 0
+    self.total_tool_calls = 0
+    self._session_started_at = time.time()
+
+
+ChatSession.print_stats = _chat_session_print_stats
+ChatSession.clear_session = _chat_session_clear
+
+
+def _print_event_live(event) -> None:
+    """Render chat events in a terminal-friendly format."""
+    from agent.task import EventType
+
+    etype = event.event_type
+    payload = event.payload
+
+    if etype == EventType.ACTION:
+        step = payload["step"]
+        action = payload["action"]
+        thought = (action.get("thought") or "").strip()
+        atype = action.get("action_type", "")
+        tc = action.get("tool_call")
+
+        if thought and thought != "(no thought)" and atype not in ("finish", "give_up"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        if tc:
+            _print_event_live._last_tool_name = tc["name"]
+            click.echo(cyan(f"  [{step}] {tc['name']}"), nl=False)
+            params = tc.get("params", {})
+            key_param = (
+                params.get("cmd")
+                or params.get("path")
+                or params.get("pattern")
+                or params.get("symbol")
+                or params.get("message")
+                or ""
+            )
+            if key_param:
+                short_param = str(key_param)[:60]
+                suffix = "..." if len(str(key_param)) > 60 else ""
+                click.echo(cyan(f"  {short_param}{suffix}"))
+            else:
+                click.echo()
+        elif atype == "finish":
+            click.echo(green(f"\n  [{step}] [OK] finish"))
+            _print_event_live._pending_message = action.get("message", "") or ""
+        elif atype == "give_up":
+            click.echo(red(f"\n  [{step}] [ERROR] give_up"))
+
+    elif etype == EventType.OBSERVATION:
+        obs = payload["observation"]
+        status = obs.get("status", "")
+        output = (obs.get("output") or "").strip()
+        error = obs.get("error")
+        tool_name = getattr(_print_event_live, "_last_tool_name", "")
+        silent_tools = {"file_read", "file_view", "file_write", "find_files", "find_symbol"}
+
+        if status == "success":
+            if tool_name in silent_tools:
+                click.echo(green("  [OK]"))
+            else:
+                lines = output.splitlines()
+                preview = "\n".join(f"    {line}" for line in lines[:20])
+                if lines:
+                    click.echo(green("  [OK]") + dim(f"\n{preview}"))
+                    if len(lines) > 20:
+                        click.echo(dim(f"    ... ({len(lines) - 20} more lines)"))
+                else:
+                    click.echo(green("  [OK]"))
+        else:
+            click.echo(red(f"  [ERROR] {error or output[:120]}"))
+
+    elif etype == EventType.REFLECTION:
+        click.echo(yellow(f"\n  [WARN] Reflection ({payload.get('reason', '')}) - reconsidering approach...\n"))
+
+    elif etype == EventType.TASK_COMPLETE:
+        message = getattr(_print_event_live, "_pending_message", "")
+        _print_event_live._pending_message = ""
+        if message:
+            streamed = getattr(_print_event_live, "_streamed_thought", "").strip()
+            stripped = message.strip()
+            if stripped and stripped != streamed:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                click.echo(stripped)
+
+    elif etype == EventType.TASK_FAILED:
+        click.echo(red(bold(f"\n  [ERROR] Failed: {payload.get('reason', '')}")))
