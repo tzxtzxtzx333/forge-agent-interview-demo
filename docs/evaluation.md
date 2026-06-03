@@ -155,3 +155,24 @@ Forge Agent 已经完成工程化 MVP 的核心闭环，能够在真实小型项
 因此，更准确的表述是：
 
 Forge Agent 已经是一个可运行、可验证、可扩展的 Coding Agent 工程化 MVP，并且在真实小型项目任务上已经证明了核心闭环可用。
+
+## 八、Post-Eval Hardening
+
+After the evaluation findings above were reproduced locally, Forge Agent received a provider compatibility hardening pass on the OpenAI-compatible backend path.
+
+The hardening focused on two areas:
+
+- `deepseek-chat` is kept as the default stable DeepSeek evaluation model
+- OpenAI-compatible message history is sanitized before provider requests so orphan `role="tool"` messages are not sent upstream
+
+What changed at the boundary level:
+
+- history trimming now preserves `assistant(tool_calls) -> tool(tool_call_id)` pairs
+- orphan tool observations are filtered before OpenAI-compatible API calls
+- the default config no longer treats DeepSeek thinking-mode models as the primary evaluation path
+
+What did not change:
+
+- this project still does not claim SWE-bench results
+- DeepSeek thinking mode is still a non-default / follow-up capability because it needs complete `reasoning_content` round-trip support
+- event logs remain append-only and still preserve the original execution trace for replay and review

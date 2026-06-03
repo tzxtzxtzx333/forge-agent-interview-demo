@@ -440,3 +440,19 @@ chat 模式把共享的 `ConversationHistory` 注入给每轮 `Agent.run()`。�
 5. 工具异常直接崩溃主循环  
 6. 测试依赖真实 API，导致慢且不稳定  
 7. prompt 与核心逻辑耦合太紧，难以维护和调试
+
+## Provider Compatibility Update
+
+Recent real-task evaluation exposed an OpenAI-compatible provider compatibility boundary in long tool-call chains:
+
+- DeepSeek thinking-mode models such as `deepseek-v4-flash` and `deepseek-v4-pro` require `reasoning_content` round-trip support.
+- Forge Agent does not treat those thinking-mode models as the default stable path yet.
+- The default stable DeepSeek evaluation path is now `deepseek-chat`.
+
+To harden the default path, the project now applies a more conservative message-history strategy for OpenAI-compatible backends:
+
+- tool messages are only sent when they still have a valid preceding `assistant.tool_calls` parent
+- orphan `role="tool"` messages are filtered before provider requests
+- history trimming preserves assistant/tool pairs instead of dropping only one side
+
+This hardening targets provider request legality and does not change the append-only event log model. Full DeepSeek thinking-mode support remains a follow-up item and requires complete `reasoning_content` persistence and replay across turns.
