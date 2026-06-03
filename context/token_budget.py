@@ -71,6 +71,31 @@ def _group_history_messages(messages: list[dict]) -> list[list[dict]]:
     return chunks
 
 
+def _sanitize_history_messages(messages: list[dict]) -> list[dict]:
+    """Drop orphan tool messages so trimming cannot preserve invalid pairs."""
+    sanitized: list[dict] = []
+    valid_tool_call_ids: set[str] = set()
+
+    for message in messages:
+        tool_call = message.get("tool_call")
+        if tool_call:
+            call_id = tool_call.get("call_id")
+            if call_id:
+                valid_tool_call_ids.add(call_id)
+            sanitized.append(message)
+            continue
+
+        if message.get("role") == "tool":
+            tool_call_id = message.get("tool_call_id")
+            if tool_call_id and tool_call_id in valid_tool_call_ids:
+                sanitized.append(message)
+            continue
+
+        sanitized.append(message)
+
+    return sanitized
+
+
 def is_tiktoken_available() -> bool:
     _init_tiktoken()
     return _tiktoken_available
@@ -125,6 +150,8 @@ class TokenBudget:
     ) -> list[dict]:
         if not messages:
             return messages
+
+        messages = _sanitize_history_messages(messages)
 
         token_counts = [_message_token_cost(message) for message in messages]
         total = sum(token_counts)

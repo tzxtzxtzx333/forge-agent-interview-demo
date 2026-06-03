@@ -1,7 +1,7 @@
 llm:
   provider: deepseek
-  model: deepseek-v4-flash # 或 deepseek-v4-pro
-  api_key: ${DEEPSEEK_API_KEY} # 在终端 export DEEPSEEK_API_KEY=你的 key
+  model: deepseek-chat # stable default path; DeepSeek thinking-mode models need reasoning_content round-trip
+  api_key: ${DEEPSEEK_API_KEY}
   base_url: https://api.deepseek.com
   max_tokens: 8192
 
@@ -12,11 +12,11 @@ agent:
 
 tools:
   shell:
-    timeout: 30 # 秒
-    max_output_tokens: 8000 # 截断长度
+    timeout: 30
+    max_output_tokens: 8000
   file:
-    max_view_lines: 100 # view 命令每次显示行数
+    max_view_lines: 100
 
 context:
-  repo_map_budget: 8000 # repo-map 最大 token 数
-  history_window: 20 # 保留最近 N 轮对话
+  repo_map_budget: 8000
+  history_window: 20
