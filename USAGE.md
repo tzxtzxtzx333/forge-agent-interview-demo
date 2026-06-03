@@ -1,6 +1,6 @@
-# Forge Agent Usage
+# Forge Agent 使用说明
 
-## Install
+## 安装
 
 ```bash
 git clone <repo-url>
@@ -10,7 +10,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Optional extras:
+可选依赖：
 
 ```bash
 pip install tiktoken
@@ -18,11 +18,11 @@ pip install tree-sitter-javascript tree-sitter-typescript tree-sitter-go tree-si
 pip install tree-sitter-c tree-sitter-cpp tree-sitter-ruby
 ```
 
-## Configure providers
+## 配置 provider
 
-Edit `config/default.yaml` if you want to change provider or model defaults.
+如果你想修改默认 provider 或 model，可编辑 `config/default.yaml`。
 
-Example:
+示例：
 
 ```yaml
 llm:
@@ -32,7 +32,7 @@ llm:
   base_url: https://api.deepseek.com
 ```
 
-Common environment variables:
+常见环境变量：
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -41,58 +41,58 @@ export DEEPSEEK_API_KEY=...
 export GROQ_API_KEY=...
 ```
 
-Ollama uses a local server instead of an API key.
+Ollama 使用本地服务，而不是 API key。
 
-## Run a basic task
+## 运行一个基础任务
 
 ```bash
 agent run --repo /path/to/project --task "Fix the failing tests"
 ```
 
-Run from a task file:
+从任务文件运行：
 
 ```bash
 agent run --repo /path/to/project --task-file task.txt
 ```
 
-## Chat mode
+## Chat 模式
 
 ```bash
 agent chat --repo /path/to/project
 ```
 
-Built-in commands:
+内置命令：
 
 - `/exit`
 - `/stats`
 - `/clear`
 - `/help`
 
-## Streaming output
+## 流式输出
 
-Streaming is enabled by default in `run`.
+`run` 模式默认启用流式输出。
 
 ```bash
 agent run --repo /path/to/project --task "Investigate the failing test" --stream
 ```
 
-## Docker sandbox mode
+## Docker 沙箱模式
 
-Use sandbox mode when you want containerized command execution:
+如果你希望命令在容器中执行，可以使用沙箱模式：
 
 ```bash
 agent run --repo /path/to/project --task "run pytest" --sandbox
 agent chat --repo /path/to/project --sandbox
 ```
 
-Notes:
+说明：
 
-- Docker sandbox is demo-grade, not production container security.
-- If Docker is unavailable, sandboxed commands fail clearly instead of falling back to local execution.
+- Docker 沙箱是 demo-grade，不是 production 级容器安全方案。
+- 如果 Docker 不可用，沙箱命令会明确失败，而不是回退到本地执行。
 
 ## Provider smoke tests
 
-Use the smoke harness for minimal provider-specific verification:
+可使用 smoke harness 做最小化的 provider 专项验证：
 
 ```bash
 python scripts/smoke_provider.py --provider ollama --model llama3
@@ -100,70 +100,70 @@ python scripts/smoke_provider.py --provider deepseek --model deepseek-chat
 python scripts/smoke_provider.py --provider anthropic --model claude-sonnet-4-5
 ```
 
-Notes:
+说明：
 
-- missing API keys produce a clear skip/configuration message
-- Ollama requires a running local server
+- 缺少 API key 时会给出明确的 skip / 配置提示
+- Ollama 需要本地服务正在运行
 
 ## GitHub Issue dry-run demo
 
-Run the GitHub issue flow locally without creating a PR:
+可在本地运行 GitHub issue 流程，而不实际创建 PR：
 
 ```bash
 python -m entry.github_issue --repo owner/repo --issue 42 --local-path ./tmp/repo --dry-run
 python -m entry.github_issue --repo owner/repo --issue 42 --local-path ./tmp/repo --no-pr
 ```
 
-Notes:
+说明：
 
-- no diff means no PR
-- diff requires commit before push / PR
-- real PR creation depends on local git credentials and GitHub auth
+- 没有 diff 就不会创建 PR
+- 有 diff 时，需要先完成 commit，之后才能 push / 创建 PR
+- 实际 PR 创建依赖本地 git 凭据与 GitHub 认证
 
-## Repo-map verification
+## Repo-map 验证
 
-Run the repo-map verification suite:
+运行 repo-map 验证测试：
 
 ```bash
 pytest tests/test_day5.py -q
 pytest tests/test_repo_map_languages.py -q
 ```
 
-Notes:
+说明：
 
-- tree-sitter language packages are optional
-- when optional packages are missing, tests use fallback behavior or skip package-specific checks
-- `find_symbol` remains Python-only and is not documented as full multi-language search
+- tree-sitter 各语言包是可选依赖
+- 当可选依赖缺失时，测试会走 fallback 行为，或跳过依赖这些包的检查
+- `find_symbol` 仍然是 Python-only，不应理解为完整的多语言搜索能力
 
 ## Event log replay
 
-List available logs:
+列出可用日志：
 
 ```bash
 agent log list
 ```
 
-Show audit summary:
+查看审计摘要：
 
 ```bash
 agent log show logs/<task_id>_<timestamp>.jsonl
 ```
 
-Replay execution trace:
+回放执行轨迹：
 
 ```bash
 agent log replay logs/<task_id>_<timestamp>.jsonl
 ```
 
-## Running tests
+## 运行测试
 
-Full test suite:
+完整测试集：
 
 ```bash
 pytest -q
 ```
 
-Selected verification commands:
+部分验证命令：
 
 ```bash
 pytest tests/test_stream.py -q
@@ -172,11 +172,11 @@ pytest tests/test_provider_matrix.py -q
 pytest tests/test_event_replay.py -q
 ```
 
-## Troubleshooting
+## 故障排查
 
-- Local shell guardrails are heuristic. Use `--sandbox` when you want a stronger boundary.
-- Docker sandbox behavior depends on Docker being installed and running.
-- Real provider smoke depends on API keys or local Ollama.
-- Event replay is an execution trace, not deterministic re-execution.
-- Windows is supported, but POSIX shell semantics may differ from native Windows shells.
-- Pytest temp files use a dedicated user-writable temp root outside the repo, with per-run subdirectories to avoid fixed temp-directory cleanup collisions and system temp-directory permission issues on Windows.
+- 本地 shell guardrails 是启发式防护。若你需要更强的边界，请使用 `--sandbox`。
+- Docker 沙箱行为依赖 Docker 已安装并正在运行。
+- 真实 provider smoke 依赖 API key 或本地 Ollama。
+- Event replay 是执行轨迹，不是 deterministic re-execution。
+- 支持 Windows，但 POSIX shell 语义可能与原生 Windows shell 不同。
+- Pytest 临时文件使用 repo 外的专用用户可写 temp 根目录，并由每次运行创建独立子目录，以避免 Windows 下固定 temp 目录清理冲突以及系统 temp 目录权限问题。
