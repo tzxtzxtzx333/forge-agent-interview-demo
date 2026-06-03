@@ -128,6 +128,8 @@ class TestExtractPythonSymbols:
         syms = _extract_python_symbols(code, Path("test.py"))
         names = [s.name for s in syms]
         assert "foo" in names
+        foo = next(s for s in syms if s.name == "foo")
+        assert foo.language == "python"
 
     def test_extracts_class(self, tmp_path):
         code = "class MyClass:\n    pass\n"
@@ -179,6 +181,14 @@ class TestExtractSymbolsRegex:
         code = "function myFunc() {\n    return 1;\n}\n"
         syms = _extract_symbols_regex(code, Path("test.js"))
         assert any(s.name == "myFunc" for s in syms)
+
+    def test_typescript_interface(self):
+        code = "interface User {\n  id: string;\n}\n"
+        syms = _extract_symbols_regex(code, Path("types.ts"))
+        user = next((s for s in syms if s.name == "User"), None)
+        assert user is not None
+        assert user.kind == "interface"
+        assert user.language == "typescript"
 
 
 # ===========================================================================

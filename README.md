@@ -1,24 +1,39 @@
 # Forge Agent
 
-一个面向代码仓库任务的 coding agent 项目。它实现了一个可运行的 ReAct 循环，支持多 LLM backend、工具调用、repo 摘要注入、持续对话、事件日志和 Docker sandbox。
+## Project Overview
 
-这个项目的目标不是“功能越多越好”，而是把核心 agent 组件做成一个可以解释、可以测试、可以展示工程判断的个人项目。
+Forge Agent is a runnable, verifiable, auditable coding agent MVP built on top of the upstream `forge-agent` project. This fork focuses on engineering hardening and claims-backed documentation: repo-scoped file editing, test execution, streaming CLI output, provider routing, Docker sandbox verification, GitHub Issue demo flow, repo-map verification, and execution-trace replay.
 
-## What It Demonstrates
+This project is not positioned as a Claude Code replacement and it is not documented as a production-grade security sandbox.
 
-- ReAct orchestration: `agent/core.py` 负责消息构建、LLM 调用、工具执行、反思触发和终止条件。
-- Tool-driven coding workflow: 文件读写、搜索、shell、pytest、git 都通过统一 `ToolRegistry` 暴露给模型。
-- Multi-backend model routing: 支持 Anthropic 与 OpenAI-compatible providers，包括 DeepSeek、Groq、Ollama。
-- Context compression: 用 repo-map 和 token budget 控制大仓库上下文。
-- Auditable runs: 每次任务写入 append-only JSONL event log，可回放和统计。
-- Safer execution defaults: shell 工具提供基础防误操作分类；需要更强隔离时使用 Docker sandbox。
+## What This Project Supports
 
-## What It Does Not Claim
+- ReAct-style coding loop for exploring a repo, calling tools, reflecting, and finishing a task
+- Repo-bound file read/write operations
+- Shell, pytest, and git tool execution
+- Streaming output in `run` and `chat`
+- Multi-provider routing for Anthropic, OpenAI, DeepSeek, Groq, and Ollama
+- Demo-grade Docker sandbox execution
+- GitHub Issue to local fix / commit / PR demo flow
+- Multi-language repo-map symbol extraction
+- Append-only JSONL event logs with replayable execution trace
+- Windows-safe ASCII CLI output
 
-- `shell` 不是强安全沙箱。它只做基础分类和确认，不能替代容器隔离。
-- Windows 本地运行是可用的，但命令语义仍然偏 POSIX-first；需要更稳定的一致性时优先使用 `--sandbox` 或 WSL。
-- “无编辑步数” 是基于受信工具元数据的保守估计，不是文件系统级精确变更检测。
-- 这个项目优先展示 agent 架构与工程取舍，不追求生产级 autonomy / security / sandbox hardening。
+## Feature Verification Matrix
+
+| Feature | Status | Implementation | Tests | Verify |
+|---|---|---|---|---|
+| ReAct coding loop | Stable MVP | `agent/core.py`, `agent/task.py` | `tests/test_day2.py`, `tests/test_day7.py` | `pytest tests/test_day2.py tests/test_day7.py -q` |
+| Repo-bound file tools | Stable | `tools/file_tool.py` | `tests/test_file_tool_repo_boundary.py` | `pytest tests/test_file_tool_repo_boundary.py -q` |
+| Shell / test / git tools | Stable | `tools/shell_tool.py`, `tools/test_tool.py`, `tools/git_tool.py` | `tests/test_day3.py`, `tests/test_sandbox.py` | `pytest tests/test_day3.py tests/test_sandbox.py -q` |
+| Streaming output | Stable | `entry/cli.py`, `agent/core.py`, `llm/openai_compat.py`, `llm/anthropic_backend.py` | `tests/test_stream.py` | `pytest tests/test_stream.py -q` |
+| Provider routing | Verified | `llm/router.py`, `llm/provider_matrix.py` | `tests/test_day4.py`, `tests/test_provider_matrix.py` | `pytest tests/test_day4.py tests/test_provider_matrix.py -q` |
+| Real provider smoke | Environment-dependent | `llm/provider_smoke.py`, `scripts/smoke_provider.py` | `tests/test_provider_matrix.py` | `python scripts/smoke_provider.py --provider ollama --model llama3` |
+| Docker sandbox | Demo-grade | `tools/runtime.py` | `tests/test_sandbox.py` | `pytest tests/test_sandbox.py -q` |
+| GitHub Issue -> PR flow | Demo-grade | `entry/github_issue.py` | `tests/test_day6.py`, `tests/test_github_issue_flow.py` | `python -m entry.github_issue --repo owner/repo --issue 42 --local-path ./tmp/repo --dry-run` |
+| Repo-map multi-language symbols | Verified fixtures | `context/repo_map.py` | `tests/test_day5.py`, `tests/test_repo_map_languages.py` | `pytest tests/test_day5.py tests/test_repo_map_languages.py -q` |
+| Event log replay / auditability | Stable MVP | `agent/event_log.py`, `entry/cli.py` | `tests/test_day1.py`, `tests/test_day6.py`, `tests/test_event_replay.py` | `pytest tests/test_event_replay.py -q` |
+| Windows-safe CLI output | Stable | `entry/cli.py`, CLI scripts | `pytest -q` | `python -m entry.cli --help` |
 
 ## Quick Start
 
@@ -30,121 +45,205 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-配置 `config/default.yaml`，并通过环境变量提供 API Key：
+Optional extras:
+
+```bash
+pip install tiktoken
+pip install tree-sitter-javascript tree-sitter-typescript tree-sitter-go tree-sitter-rust tree-sitter-java
+pip install tree-sitter-c tree-sitter-cpp tree-sitter-ruby
+```
+
+Provider configuration is environment-variable driven. Example:
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxx
 # or ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY
 ```
 
-推荐先跑 smoke test：
+Run a basic task:
 
 ```bash
-python smoke_test.py
+agent run --repo . --task "Fix the failing tests"
 ```
 
-## Recommended Verification
-
-仓库内推荐的基础验证命令：
-
-```bash
-pytest -q
-```
-
-`pyproject.toml` 已固定 `--basetemp=.pytest_tmp`，避免默认系统临时目录在某些 Windows 环境下的权限问题。
-
-## Usage
-
-### Chat mode
-
-```bash
-agent chat --repo /path/to/project
-agent chat --repo /path/to/project --sandbox
-```
-
-适合持续对话、多轮迭代。内置命令：
-
-- `/exit`
-- `/stats`
-- `/clear`
-- `/help`
-
-### Run mode
-
-```bash
-agent run --repo /path/to/project --task "Fix the failing tests"
-agent run --repo /path/to/project --task-file task.txt
-agent run --repo /path/to/project --task "..." --confirm
-agent run --repo /path/to/project --task "..." --sandbox
-```
-
-## Architecture
+## Core Architecture
 
 ```text
 entry (cli/chat/github issue)
   -> agent core
-  -> llm backend
+  -> llm backend / router
   -> tool registry + runtime
   -> context helpers
+  -> event log / replay
 ```
 
 Key files:
 
 - `agent/core.py`: ReAct loop
-- `agent/event_log.py`: append-only event log
-- `llm/router.py`: backend selection
-- `tools/`: tool implementations
-- `context/repo_map.py`: repo summary generation
-- `context/token_budget.py`: token trimming rules
+- `agent/event_log.py`: append-only JSONL event log and execution trace helpers
+- `llm/router.py`: provider selection
+- `tools/`: file, shell, test, git, and runtime layers
+- `context/repo_map.py`: repo summary and symbol extraction
 
-## Safety Model
+## Provider Support
 
-`tools/shell_tool.py` 将命令分成三类：
+Supported routing targets:
 
-- Hard blocked: 明显危险命令直接拒绝。
-- Read-only pass-through: 明确只读命令直接执行。
-- Confirm-required: 含写风险、shell 拼接、重定向、嵌套 shell、可疑 inline interpreter 命令时要求确认；在 `run` 模式下若未开启 `--confirm`，会跳过人工确认直接执行。
+- Anthropic
+- OpenAI
+- DeepSeek
+- Groq
+- Ollama
 
-如果你要在面试里回答“它安全吗”，更准确的表述是：
+Provider verification is backed by:
 
-- 本地 shell 只有基础 guardrails。
-- 真正可信的隔离边界是 `DockerRuntime`。
+- `tests/test_day4.py`
+- `tests/test_provider_matrix.py`
+- `scripts/smoke_provider.py`
+- [docs/providers.md](/C:/Users/DELL/Desktop/forge-agent-main/docs/providers.md)
 
-## Context Handling
+Use the smoke harness for environment-specific checks:
 
-- 首条任务消息始终保留。
-- 历史会按 token budget 裁剪。
-- tool transcript 以原子块保留：`assistant(tool_call)` 与对应 `tool` observation 不会被拆开。
+```bash
+python scripts/smoke_provider.py --provider ollama --model llama3
+python scripts/smoke_provider.py --provider deepseek --model deepseek-chat
+```
 
-这能避免长会话下生成不合法的 tool history。
+## Docker Sandbox
 
-## Logging
+The Docker sandbox is documented as a demo-grade container boundary, not a production security product.
 
-每次运行生成一个 JSONL event log，记录：
+Current behavior is backed by:
 
-- task start
-- action
-- observation
-- reflection
-- task complete / failed
+- `tools/runtime.py`
+- `tests/test_sandbox.py`
 
-日志实例显式绑定真实 `task_id`，不会再通过文件名猜测，避免带下划线的 task id 被错误截断。
+Verification:
 
-## Known Trade-offs / Boundaries
+```bash
+pytest tests/test_sandbox.py -q
+```
 
-- 没有实现多工具并发调用。
-- 没有做严格 shell AST 级解析，只做保守规则分类。
-- repo-map 仍是轻量实现，适合面试项目，不是大型生产仓库的最终形态。
-- 部分能力更偏“可解释的工程样例”，不是生产级 agent platform。
+Boundary notes:
 
-## Why This Is a Better Interview Project Now
+- local shell guardrails are heuristic
+- Docker sandbox defaults to stable limits such as `--network none`
+- advanced isolation guarantees are out of scope for this project
 
-相比单纯“能跑”的 demo，这个版本更适合 agent / systems 面试追问：
+## GitHub Issue -> PR Demo Flow
 
-- 文档承诺与实现更一致。
-- 关键边界有测试覆盖。
-- 安全、上下文、日志、运行语义的取舍是明确的，而不是隐含的。
+The GitHub entrypoint is intended for demo flow validation, not unattended production automation.
 
-## More
+Current behavior is backed by:
 
-更详细的命令示例见 [USAGE.md](/abs/path/C:/Users/DELL/Desktop/forge-agent-main/USAGE.md)。
+- `entry/github_issue.py`
+- `tests/test_day6.py`
+- `tests/test_github_issue_flow.py`
+
+Verification:
+
+```bash
+pytest tests/test_day6.py tests/test_github_issue_flow.py -q
+python -m entry.github_issue --repo owner/repo --issue 42 --local-path ./tmp/repo --dry-run
+```
+
+Notes:
+
+- no diff means no push and no PR
+- diff requires `git add` and `git commit`
+- real push / PR creation depends on local git credentials and GitHub auth
+
+## Repo-map
+
+Repo-map is lightweight multi-language symbol extraction for prompt context, not full semantic code intelligence.
+
+Current behavior is backed by:
+
+- `context/repo_map.py`
+- `tests/test_day5.py`
+- `tests/test_repo_map_languages.py`
+
+Verification:
+
+```bash
+pytest tests/test_day5.py tests/test_repo_map_languages.py -q
+```
+
+Supported fixture-verified languages:
+
+- Python
+- JavaScript
+- TypeScript
+- Go
+- Rust
+- Java
+- C
+- C++
+- Ruby
+
+`tools/find_symbol` remains a Python-only regex helper. It is not documented as full multi-language symbol search.
+
+## Event Log / Replay
+
+Each run writes an append-only JSONL log and can be replayed as an execution trace.
+
+Current behavior is backed by:
+
+- `agent/event_log.py`
+- `tests/test_day1.py`
+- `tests/test_event_replay.py`
+- `entry/cli.py`
+
+Verification:
+
+```bash
+pytest tests/test_event_replay.py -q
+agent log show logs/<task_id>_<timestamp>.jsonl
+agent log replay logs/<task_id>_<timestamp>.jsonl
+```
+
+Replay is an execution trace for auditability. It is not deterministic re-execution.
+
+## Safety Model and Limitations
+
+- Local shell guardrails are not a strong sandbox.
+- Docker sandbox is demo-grade, not production container security.
+- Real provider smoke depends on API keys or local Ollama.
+- GitHub PR flow depends on local git credentials and GitHub authentication.
+- Repo-map is symbol extraction, not full semantic code intelligence.
+- Event replay is an execution trace, not deterministic re-execution.
+- Windows is supported, but POSIX shell semantics may differ.
+- This project is an MVP coding agent, not a production autonomy platform.
+
+## Test and Verification
+
+Primary verification commands:
+
+```bash
+pytest -q
+python scripts/smoke_provider.py --help
+python -m entry.cli --help
+python -m entry.cli log --help
+```
+
+Current baseline verified in this workspace:
+
+- `pytest -q` -> `468 passed, 18 skipped`
+
+`pyproject.toml` fixes `--basetemp=.pytest_tmp` to reduce Windows temp-directory issues.
+
+For day-to-day operation details, see [USAGE.md](/C:/Users/DELL/Desktop/forge-agent-main/USAGE.md).
+
+## Upstream / Attribution
+
+This project is based on the upstream `forge-agent` repository. This fork does not claim the original framework was built entirely from scratch here.
+
+The V2 work in this fork focuses on:
+
+- engineering hardening
+- claims-backed documentation
+- provider verification and smoke harnesses
+- Docker sandbox verification
+- GitHub Issue demo flow verification
+- repo-map multi-language verification
+- event log replay and auditability

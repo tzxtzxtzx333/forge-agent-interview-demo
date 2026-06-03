@@ -1,22 +1,5 @@
 """
-entry/github_issue.py
-
-GitHub Issue 自动修复入口。
-
-流程：
-1. 拉取 Issue 标题 + body 作为任务描述
-2. Clone 或使用已有的本地 repo
-3. 在新分支上运行 agent
-4. agent 完成后创建 PR（可选）
-
-用法：
-    python -m entry.github_issue \
-        --repo owner/repo \
-        --issue 42 \
-        --local-path /tmp/myrepo
-
-依赖：
-    pip install PyGithub gitpython
+GitHub Issue auto-fix demo flow.
 """
 
 from __future__ import annotations
@@ -25,6 +8,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -34,15 +18,16 @@ if str(_ROOT) not in sys.path:
 
 import click
 
+from agent.core import Agent, AgentConfig
+from agent.event_log import EventLog
+from agent.task import Task
+from config.schema import load_config
+from entry.cli import _build_app_components
+
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# GitHub 操作
-# ---------------------------------------------------------------------------
-
 def _get_github_client():
-    """初始化 PyGithub 客户端，从环境变量读 token。"""
     try:
         from github import Github
     except ImportError:
@@ -58,12 +43,6 @@ def _get_github_client():
 
 
 def fetch_issue(repo_name: str, issue_number: int) -> tuple[str, str, str]:
-    """
-    拉取 GitHub Issue 内容。
-
-    Returns:
-        (title, body, html_url)
-    """
     gh = _get_github_client()
     repo = gh.get_repo(repo_name)
     issue = repo.get_issue(issue_number)
@@ -77,20 +56,8 @@ def create_pull_request(
     body: str,
     base: str = "main",
 ) -> str:
-    """
-    创建 PR，返回 PR URL。
-
-    Args:
-        repo_name: "owner/repo" 格式
-        branch:    源分支（agent 在这个分支上做了修改）
-        title:     PR 标题
-        body:      PR 描述
-        base:      目标分支，默认 main
-    """
     gh = _get_github_client()
     repo = gh.get_repo(repo_name)
-
-    # 检查 base 分支是否存在，不存在时尝试 master
     try:
         repo.get_branch(base)
     except Exception:
@@ -105,55 +72,46 @@ def create_pull_request(
     return pr.html_url
 
 
-# ---------------------------------------------------------------------------
-# Git 操作
-# ---------------------------------------------------------------------------
-
-def _run_git(args: list[str], cwd: str) -> tuple[bool, str]:
-    """运行 git 命令，返回 (success, output)。"""
+def _run_git(args: list[str], cwd: str | Path) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
             ["git"] + args,
             capture_output=True,
             text=True,
             timeout=60,
-            cwd=cwd,
+            cwd=str(cwd),
         )
         output = (proc.stdout + proc.stderr).strip()
         return proc.returncode == 0, output
-    except Exception as e:
-        return False, str(e)
+    except Exception as exc:
+        return False, str(exc)
 
 
-def clone_repo(repo_name: str, local_path: str) -> None:
-    """Clone repo 到本地路径（如果已存在则跳过）。"""
+def build_clone_url(repo_name: str) -> str:
+    return f"https://github.com/{repo_name}.git"
+
+
+def clone_repo(repo_name: str, local_path: str | Path) -> None:
     path = Path(local_path)
     if path.exists() and (path / ".git").exists():
-        logger.info("Repo already exists at %s, skipping clone", local_path)
+        logger.info("Repo already exists at %s, skipping clone", path)
         return
 
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if token:
-        url = f"https://{token}@github.com/{repo_name}.git"
-    else:
-        url = f"https://github.com/{repo_name}.git"
-
-    click.echo(f"Cloning {repo_name} → {local_path} ...")
-    ok, out = _run_git(["clone", url, local_path], cwd="/tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    url = build_clone_url(repo_name)
+    click.echo(f"Cloning {repo_name} -> {path} ...")
+    ok, out = _run_git(["clone", url, str(path)], cwd=path.parent)
     if not ok:
         raise RuntimeError(f"git clone failed: {out}")
 
 
-def create_branch(local_path: str, branch: str) -> None:
-    """创建并切换到新分支。"""
-    ok, out = _run_git(["checkout", "-b", branch], cwd=local_path)
+def create_branch(local_path: str | Path, branch: str) -> None:
+    ok, _ = _run_git(["checkout", "-b", branch], cwd=local_path)
     if not ok:
-        # 分支已存在，切换过去
         _run_git(["checkout", branch], cwd=local_path)
 
 
-def push_branch(local_path: str, branch: str) -> None:
-    """推送分支到远端。"""
+def push_branch(local_path: str | Path, branch: str) -> None:
     ok, out = _run_git(
         ["push", "--set-upstream", "origin", branch],
         cwd=local_path,
@@ -162,162 +120,233 @@ def push_branch(local_path: str, branch: str) -> None:
         raise RuntimeError(f"git push failed: {out}")
 
 
-# ---------------------------------------------------------------------------
-# 核心流程
-# ---------------------------------------------------------------------------
+def list_modified_files(local_path: str | Path) -> list[str]:
+    ok, out = _run_git(["diff", "--name-only"], cwd=local_path)
+    if not ok or not out:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def has_working_tree_changes(local_path: str | Path) -> bool:
+    return len(list_modified_files(local_path)) > 0
+
+
+def commit_all_changes(local_path: str | Path, message: str) -> tuple[bool, str]:
+    ok, out = _run_git(["add", "."], cwd=local_path)
+    if not ok:
+        return False, out
+    return _run_git(["commit", "-m", message], cwd=local_path)
+
+
+def summarize_test_result(log) -> tuple[str, str]:
+    try:
+        from agent.task import EventType
+    except ImportError:
+        return ("not available", "not available")
+
+    last_test_command = "not available"
+    last_test_result = "not available"
+    current_test_tool = None
+    for event in log.replay():
+        if event.event_type == EventType.ACTION:
+            action = event.payload.get("action", {})
+            tool_call = action.get("tool_call") or {}
+            if tool_call.get("name") == "test":
+                current_test_tool = "test"
+                params = tool_call.get("params", {})
+                path = params.get("path", "")
+                args = params.get("args", "")
+                if path or args:
+                    last_test_command = f"test path={path} args={args}".strip()
+                else:
+                    last_test_command = "test"
+            else:
+                current_test_tool = None
+        elif event.event_type == EventType.OBSERVATION and current_test_tool == "test":
+            observation = event.payload.get("observation", {})
+            status = observation.get("status", "unknown")
+            output = (observation.get("output") or "").strip()
+            short_output = output.splitlines()[-1] if output else status
+            last_test_result = f"{status}: {short_output}"
+            current_test_tool = None
+    return last_test_command, last_test_result
+
+
+def build_pr_body(
+    *,
+    issue_number: int,
+    issue_title: str,
+    task_summary: str,
+    modified_files: list[str],
+    test_command: str,
+    test_result: str,
+    event_log_path: str,
+) -> str:
+    files_block = "\n".join(f"- {path}" for path in modified_files) or "- none"
+    return (
+        f"Fixes #{issue_number}\n\n"
+        f"## Issue\n"
+        f"#{issue_number}: {issue_title}\n\n"
+        f"## Summary\n"
+        f"{task_summary}\n\n"
+        f"## Modified Files\n"
+        f"{files_block}\n\n"
+        f"## Verification\n"
+        f"Test command: {test_command}\n"
+        f"Test result: {test_result}\n\n"
+        f"## Event Log\n"
+        f"{event_log_path}\n"
+    )
+
+
+def resolve_local_repo_path(repo_name: str, local_path: str | None) -> tuple[Path, object | None]:
+    if local_path:
+        return Path(local_path).resolve(), None
+    temp_dir = tempfile.TemporaryDirectory(prefix="forge-agent-gh-")
+    repo_dir = Path(temp_dir.name) / repo_name.split("/")[-1]
+    return repo_dir, temp_dir
+
 
 def run_on_issue(
     repo_name: str,
     issue_number: int,
-    local_path: str,
+    local_path: str | None,
     config_path: str | None = None,
     create_pr: bool = True,
     base_branch: str = "main",
+    dry_run: bool = False,
 ) -> int:
-    """
-    拉取 Issue，运行 agent，创建 PR。
-
-    Returns:
-        0 if success, 1 if failed
-    """
-    from config.schema import load_config
-    from agent.core import Agent, AgentConfig
-    from agent.event_log import EventLog
-    from agent.task import Task
     config = load_config(config_path)
+    repo_path, temp_dir = resolve_local_repo_path(repo_name, local_path)
 
-    # 1. 拉取 Issue
-    click.echo(f"\nFetching issue #{issue_number} from {repo_name} ...")
     try:
+        click.echo(f"\nFetching issue #{issue_number} from {repo_name} ...")
         title, body, issue_url = fetch_issue(repo_name, issue_number)
-    except Exception as e:
-        click.echo(f"Error fetching issue: {e}", err=True)
-        return 1
+        click.echo(f"  Title: {title}")
+        description = f"Fix GitHub Issue #{issue_number}: {title}\n\n{body}"
 
-    click.echo(f"  Title: {title}")
-    description = f"Fix GitHub Issue #{issue_number}: {title}\n\n{body}"
+        clone_repo(repo_name, repo_path)
 
-    # 2. Clone（如果需要）
-    try:
-        clone_repo(repo_name, local_path)
-    except RuntimeError as e:
-        click.echo(f"Error: {e}", err=True)
-        return 1
+        branch = f"agent/fix-issue-{issue_number}-{int(time.time())}"
+        create_branch(repo_path, branch)
+        click.echo(f"  Branch: {branch}")
 
-    # 3. 创建工作分支
-    branch = f"agent/fix-issue-{issue_number}-{int(time.time())}"
-    create_branch(local_path, branch)
-    click.echo(f"  Branch: {branch}")
-
-    # 4. 构建 agent
-    try:
-        from entry.cli import _build_app_components
         parts = _build_app_components(
             config,
-            repo_path=local_path,
+            repo_path=str(repo_path),
             sandbox=False,
             confirm=False,
             chat_mode=False,
         )
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        return 1
-
-    backend = parts["backend"]
-    registry = parts["registry"]
-
-    agent_config = AgentConfig(
-        max_steps=config.agent.max_steps,
-        budget_tokens=config.agent.budget_tokens,
-    )
-    agent = Agent(backend, registry, agent_config)
-
-    task = Task(
-        description=description,
-        repo_path=local_path,
-        issue_url=issue_url,
-        max_steps=config.agent.max_steps,
-        budget_tokens=config.agent.budget_tokens,
-    )
-
-    # 5. 运行 agent
-    click.echo(f"\nRunning agent on issue #{issue_number} ...")
-    t0 = time.time()
-    with EventLog.create(task, log_dir=config.agent.log_dir) as log:
-        result = agent.run(task, log)
-
-    elapsed = time.time() - t0
-    click.echo(f"  Status : {result.status.value}")
-    click.echo(f"  Steps  : {result.steps_taken}")
-    click.echo(f"  Tokens : {result.total_tokens:,}")
-    click.echo(f"  Time   : {elapsed:.1f}s")
-
-    if not result.is_success():
-        click.echo(f"  Agent did not complete the task.", err=True)
-        return 1
-
-    # 6. Push 分支
-    if create_pr:
-        click.echo("\nPushing branch ...")
-        try:
-            push_branch(local_path, branch)
-        except RuntimeError as e:
-            click.echo(f"Warning: push failed: {e}", err=True)
-            click.echo("Changes are committed locally. Push manually to create a PR.")
-            return 0
-
-        # 7. 创建 PR
-        pr_title = f"[Agent] Fix issue #{issue_number}: {title}"
-        pr_body = (
-            f"Fixes #{issue_number}\n\n"
-            f"This PR was automatically generated by the coding agent.\n\n"
-            f"## Summary\n{result.summary}\n\n"
-            f"## Task\n{description[:500]}"
+        agent = Agent(
+            parts["backend"],
+            parts["registry"],
+            AgentConfig(
+                max_steps=config.agent.max_steps,
+                budget_tokens=config.agent.budget_tokens,
+            ),
         )
-        try:
-            pr_url = create_pull_request(
-                repo_name=repo_name,
-                branch=branch,
-                title=pr_title,
-                body=pr_body,
-                base=base_branch,
+        task = Task(
+            description=description,
+            repo_path=str(repo_path),
+            issue_url=issue_url,
+            max_steps=config.agent.max_steps,
+            budget_tokens=config.agent.budget_tokens,
+        )
+
+        click.echo(f"\nRunning agent on issue #{issue_number} ...")
+        t0 = time.time()
+        with EventLog.create(task, log_dir=config.agent.log_dir) as log:
+            result = agent.run(task, log)
+            elapsed = time.time() - t0
+            click.echo(f"  Status : {result.status.value}")
+            click.echo(f"  Steps  : {result.steps_taken}")
+            click.echo(f"  Tokens : {result.total_tokens:,}")
+            click.echo(f"  Time   : {elapsed:.1f}s")
+
+            if not result.is_success():
+                click.echo("  Agent did not complete the task.", err=True)
+                return 1
+
+            modified_files = list_modified_files(repo_path)
+            if not modified_files:
+                click.echo("  No changes detected. No PR created.")
+                return 0
+
+            commit_message = f"[Agent] Fix issue #{issue_number}: {title}"
+            ok, commit_output = commit_all_changes(repo_path, commit_message)
+            if not ok:
+                click.echo(f"Error: git commit failed: {commit_output}", err=True)
+                return 1
+
+            test_command, test_result = summarize_test_result(log)
+            pr_body = build_pr_body(
+                issue_number=issue_number,
+                issue_title=title,
+                task_summary=result.summary,
+                modified_files=modified_files,
+                test_command=test_command,
+                test_result=test_result,
+                event_log_path=str(log.path),
             )
-            click.echo(f"\n✓ PR created: {pr_url}\n")
-        except Exception as e:
-            click.echo(f"Warning: PR creation failed: {e}", err=True)
-            click.echo(f"Branch pushed. Create PR manually from branch: {branch}")
 
-    return 0
+            if dry_run or not create_pr:
+                click.echo("  Dry run complete. Changes committed locally. No PR created.")
+                return 0
 
+            click.echo("\nPushing branch ...")
+            try:
+                push_branch(repo_path, branch)
+            except RuntimeError as exc:
+                click.echo(f"Warning: push failed: {exc}", err=True)
+                click.echo("Changes are committed locally. Push manually to create a PR.")
+                return 0
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+            pr_title = f"[Agent] Fix issue #{issue_number}: {title}"
+            try:
+                pr_url = create_pull_request(
+                    repo_name=repo_name,
+                    branch=branch,
+                    title=pr_title,
+                    body=pr_body,
+                    base=base_branch,
+                )
+                click.echo(f"\n[OK] PR created: {pr_url}\n")
+            except Exception as exc:
+                click.echo(f"Warning: PR creation failed: {exc}", err=True)
+                click.echo(f"Branch pushed. Create PR manually from branch: {branch}")
+
+        return 0
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
+
 
 @click.command()
 @click.option("--repo", "-r", required=True, help="GitHub repo (owner/repo)")
 @click.option("--issue", "-i", required=True, type=int, help="Issue number")
 @click.option(
-    "--local-path", "-l", required=True,
-    help="Local path to clone/use the repo",
+    "--local-path", "-l", default=None,
+    help="Local path to clone/use the repo. If omitted, a temporary directory is used.",
 )
 @click.option("--config", "-c", default=None, help="Config YAML path")
-@click.option("--no-pr", is_flag=True, help="Skip PR creation")
+@click.option("--no-pr", is_flag=True, help="Skip push and PR creation")
+@click.option("--dry-run", is_flag=True, help="Run through diff and commit checks without pushing or creating a PR")
 @click.option("--base-branch", default="main", help="Base branch for PR (default: main)")
 @click.option("--verbose", "-v", is_flag=True)
 def main(
     repo: str,
     issue: int,
-    local_path: str,
+    local_path: str | None,
     config: str | None,
     no_pr: bool,
+    dry_run: bool,
     base_branch: str,
     verbose: bool,
 ) -> None:
-    """Run the coding agent on a GitHub issue and create a PR."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
-        format="%(asctime)s %(levelname)-7s %(name)s — %(message)s",
+        format="%(asctime)s %(levelname)-7s %(name)s - %(message)s",
     )
     sys.exit(run_on_issue(
         repo_name=repo,
@@ -326,6 +355,7 @@ def main(
         config_path=config,
         create_pr=not no_pr,
         base_branch=base_branch,
+        dry_run=dry_run,
     ))
 
 

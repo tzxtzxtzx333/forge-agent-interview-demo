@@ -170,6 +170,11 @@ class TestCliHelp:
         result = runner.invoke(cli, ["log", "show", "--help"])
         assert result.exit_code == 0
 
+    def test_log_replay_help(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["log", "replay", "--help"])
+        assert result.exit_code == 0
+
     def test_log_list_help(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["log", "list", "--help"])
@@ -329,7 +334,8 @@ class TestCliLog:
         runner = CliRunner()
         result = runner.invoke(cli, ["log", "show", str(log_path)], obj={})
         assert result.exit_code == 0
-        assert "Total events" in result.output
+        assert "Task id" in result.output
+        assert "Final status" in result.output
 
     def test_log_list(self, tmp_path):
         log_dir = tmp_path / "logs"
@@ -340,6 +346,7 @@ class TestCliLog:
         result = runner.invoke(cli, ["log", "list", "--dir", str(log_dir)], obj={})
         assert result.exit_code == 0
         assert "abc_20240101.jsonl" in result.output
+        assert "status=" in result.output
 
     def test_log_list_empty(self, tmp_path):
         log_dir = tmp_path / "empty_logs"
@@ -348,6 +355,43 @@ class TestCliLog:
         result = runner.invoke(cli, ["log", "list", "--dir", str(log_dir)], obj={})
         assert result.exit_code == 0
         assert "No log files" in result.output
+
+    def test_log_replay(self, tmp_path):
+        from agent.event_log import EventLog
+        from agent.task import Task, Action, ActionType, Observation, ObservationStatus, ToolCall
+
+        task = Task(
+            task_id="replay01",
+            description="test replay",
+            repo_path=str(tmp_path),
+        )
+
+        with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
+            log.log_task_start(task)
+            log.log_action(
+                step=1,
+                action=Action(
+                    action_type=ActionType.TOOL_CALL,
+                    thought="run tests",
+                    tool_call=ToolCall(name="test", params={"path": "tests/"}),
+                ),
+            )
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.SUCCESS,
+                    output="1 passed in 0.01s",
+                    tool_name="test",
+                ),
+            )
+            log.log_task_complete(steps=1, summary="done")
+            log_path = log.path
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["log", "replay", str(log_path)], obj={})
+        assert result.exit_code == 0
+        assert "[TASK] replay01" in result.output
+        assert "[STEP 1] tool_call" in result.output
 
 
 # ===========================================================================

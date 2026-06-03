@@ -20,6 +20,7 @@ import pytest
 from tools.runtime import (
     DockerRuntime, LocalRuntime, RunResult, create_runtime, is_docker_available,
     CONTAINER_WORKDIR, SANDBOX_IMAGE,
+    DEFAULT_CPU_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_PIDS_LIMIT,
 )
 from tools.shell_tool import ShellTool
 from tools.test_tool import PytestTool
@@ -219,6 +220,27 @@ class TestCreateRuntime:
         assert isinstance(rt, DockerRuntime)
         assert rt._network is True
 
+    def test_hardening_flags_propagated(self, tmp_path):
+        rt = create_runtime(
+            sandbox=True,
+            repo_path=str(tmp_path),
+            pids_limit=123,
+            memory_limit="512m",
+            cpu_limit="0.5",
+            no_new_privileges=False,
+            read_only_rootfs=True,
+            writable_tmpfs=True,
+            container_user="1000:1000",
+        )
+        assert isinstance(rt, DockerRuntime)
+        assert rt._pids_limit == 123
+        assert rt._memory_limit == "512m"
+        assert rt._cpu_limit == "0.5"
+        assert rt._no_new_privileges is False
+        assert rt._read_only_rootfs is True
+        assert rt._writable_tmpfs is True
+        assert rt._container_user == "1000:1000"
+
     def test_local_runtime_context_manager(self):
         with create_runtime(sandbox=False) as rt:
             result = rt.exec("echo hi")
@@ -273,6 +295,81 @@ class TestDockerRuntimeUnit:
         docker_run_call = next(a for a in run_calls if a[:2] == ["docker", "run"])
         assert "--network" not in docker_run_call
 
+    def test_default_hardening_flags_present(self, tmp_path):
+        rt = self._make_runtime(tmp_path)
+
+        run_calls = []
+
+        def mock_run(args, **kwargs):
+            run_calls.append(args)
+            m = MagicMock()
+            if args[:2] == ["docker", "info"]:
+                m.returncode = 0
+                m.stdout = ""
+                m.stderr = ""
+            else:
+                m.returncode = 0
+                m.stdout = "container-id"
+                m.stderr = ""
+            return m
+
+        with patch("subprocess.run", side_effect=mock_run):
+            rt.exec("echo hello")
+
+        docker_run_call = next(a for a in run_calls if a[:2] == ["docker", "run"])
+        assert ["--network", "none"] == docker_run_call[
+            docker_run_call.index("--network"):docker_run_call.index("--network") + 2
+        ]
+        assert ["--security-opt", "no-new-privileges"] == docker_run_call[
+            docker_run_call.index("--security-opt"):docker_run_call.index("--security-opt") + 2
+        ]
+        assert ["--pids-limit", str(DEFAULT_PIDS_LIMIT)] == docker_run_call[
+            docker_run_call.index("--pids-limit"):docker_run_call.index("--pids-limit") + 2
+        ]
+        assert ["--memory", DEFAULT_MEMORY_LIMIT] == docker_run_call[
+            docker_run_call.index("--memory"):docker_run_call.index("--memory") + 2
+        ]
+        assert ["--cpus", DEFAULT_CPU_LIMIT] == docker_run_call[
+            docker_run_call.index("--cpus"):docker_run_call.index("--cpus") + 2
+        ]
+
+    def test_optional_hardening_flags_are_configurable(self, tmp_path):
+        rt = DockerRuntime(
+            repo_path=str(tmp_path),
+            read_only_rootfs=True,
+            writable_tmpfs=True,
+            container_user="1000:1000",
+            no_new_privileges=False,
+        )
+
+        run_calls = []
+
+        def mock_run(args, **kwargs):
+            run_calls.append(args)
+            m = MagicMock()
+            if args[:2] == ["docker", "info"]:
+                m.returncode = 0
+                m.stdout = ""
+                m.stderr = ""
+            else:
+                m.returncode = 0
+                m.stdout = "container-id"
+                m.stderr = ""
+            return m
+
+        with patch("subprocess.run", side_effect=mock_run):
+            rt.exec("echo hello")
+
+        docker_run_call = next(a for a in run_calls if a[:2] == ["docker", "run"])
+        assert "--read-only" in docker_run_call
+        assert ["--tmpfs", "/tmp:rw,nosuid,nodev"] == docker_run_call[
+            docker_run_call.index("--tmpfs"):docker_run_call.index("--tmpfs") + 2
+        ]
+        assert ["--user", "1000:1000"] == docker_run_call[
+            docker_run_call.index("--user"):docker_run_call.index("--user") + 2
+        ]
+        assert "--security-opt" not in docker_run_call
+
     def test_docker_unavailable_returns_error(self, tmp_path):
         """Docker 不可用时 exec() 返回 error，不崩溃。"""
         rt = self._make_runtime(tmp_path)
@@ -284,6 +381,17 @@ class TestDockerRuntimeUnit:
 
         assert not result.success
         assert "docker" in result.stderr.lower() or "not available" in result.stderr.lower()
+
+    def test_exec_timeout_returns_clear_error(self, tmp_path):
+        rt = self._make_runtime(tmp_path)
+        rt._container_id = "fake-container-id"
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["docker"], timeout=2)):
+            result = rt.exec("sleep 10", timeout=2)
+
+        assert not result.success
+        assert "timed out" in result.stderr.lower()
+        assert "container" in result.stderr.lower()
 
     def test_container_start_failure_returns_error(self, tmp_path):
         """容器启动失败时返回 error。"""
@@ -350,6 +458,43 @@ class TestDockerRuntimeUnit:
         assert rm_call is not None
         assert "abc123" in rm_call
 
+    def test_shell_tool_output_limit_applies_with_docker_runtime(self, tmp_path):
+        rt = self._make_runtime(tmp_path)
+        rt._container_id = "fake-container-id"
+        long_text = "x" * 9000
+
+        def mock_run(args, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stdout = long_text
+            m.stderr = ""
+            return m
+
+        with patch("subprocess.run", side_effect=mock_run):
+            result = ShellTool(runtime=rt).execute({"cmd": "python3 -c \"print('x')\""})
+
+        assert result.success
+        assert "truncated" in result.output
+        assert len(result.output) < len(long_text)
+
+    def test_tools_use_docker_runtime_when_injected(self, tmp_path):
+        rt = self._make_runtime(tmp_path)
+        calls = []
+
+        def record_exec(cmd, cwd=None, timeout=30):
+            calls.append((cmd, cwd, timeout))
+            return RunResult(returncode=0, stdout="ok\n", stderr="")
+
+        rt.exec = record_exec  # type: ignore[method-assign]
+
+        assert ShellTool(runtime=rt).execute({"cmd": "echo hi"}).success
+        assert PytestTool(runtime=rt).execute({"path": "tests/", "cwd": str(tmp_path)}).success
+        assert GitStatusTool(runtime=rt).execute({"cwd": str(tmp_path)}).success
+
+        assert calls[0][0] == "echo hi"
+        assert "pytest" in calls[1][0]
+        assert calls[2][0].startswith("git status")
+
 
 # ===========================================================================
 # DockerRuntime — 集成测试（需要真实 Docker）
@@ -412,6 +557,12 @@ class TestDockerRuntimeIntegration:
             result = tool.execute({"cmd": "python3 --version"})
         assert result.success
         assert "Python" in result.output
+
+    def test_timeout_is_enforced(self, tmp_path):
+        with DockerRuntime(repo_path=str(tmp_path)) as rt:
+            result = rt.exec("python3 -c \"import time; time.sleep(10)\"", timeout=1)
+        assert not result.success
+        assert "timed out" in result.stderr.lower()
 
 
 # ===========================================================================

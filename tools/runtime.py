@@ -177,6 +177,10 @@ SANDBOX_IMAGE = "python:3.11-slim"
 
 # 容器内 repo 的挂载路径
 CONTAINER_WORKDIR = "/workspace"
+DEFAULT_PIDS_LIMIT = 256
+DEFAULT_MEMORY_LIMIT = "1g"
+DEFAULT_CPU_LIMIT = "1.0"
+DEFAULT_NO_NEW_PRIVILEGES = True
 
 
 class DockerRuntime(Runtime):
@@ -205,12 +209,26 @@ class DockerRuntime(Runtime):
         extra_mounts: list[tuple[str, str]] | None = None,
         setup_cmds: list[str] | None = None,
         network: bool = False,
+        pids_limit: int = DEFAULT_PIDS_LIMIT,
+        memory_limit: str = DEFAULT_MEMORY_LIMIT,
+        cpu_limit: str = DEFAULT_CPU_LIMIT,
+        no_new_privileges: bool = DEFAULT_NO_NEW_PRIVILEGES,
+        read_only_rootfs: bool = False,
+        writable_tmpfs: bool = False,
+        container_user: str | None = None,
     ) -> None:
         self._repo_path = str(Path(repo_path).resolve())
         self._image = image
         self._extra_mounts = extra_mounts or []
         self._setup_cmds = setup_cmds or []
         self._network = network
+        self._pids_limit = pids_limit
+        self._memory_limit = memory_limit
+        self._cpu_limit = cpu_limit
+        self._no_new_privileges = no_new_privileges
+        self._read_only_rootfs = read_only_rootfs
+        self._writable_tmpfs = writable_tmpfs
+        self._container_user = container_user
         self._container_id: str | None = None
         # 容器名加随机后缀，避免冲突
         self._container_name = f"coding-agent-sandbox-{uuid.uuid4().hex[:8]}"
@@ -335,6 +353,20 @@ class DockerRuntime(Runtime):
         ]
         if not self._network:
             run_args += ["--network", "none"]           # 默认断网，更安全
+        if self._no_new_privileges:
+            run_args += ["--security-opt", "no-new-privileges"]
+        if self._pids_limit > 0:
+            run_args += ["--pids-limit", str(self._pids_limit)]
+        if self._memory_limit:
+            run_args += ["--memory", self._memory_limit]
+        if self._cpu_limit:
+            run_args += ["--cpus", self._cpu_limit]
+        if self._read_only_rootfs:
+            run_args.append("--read-only")
+        if self._writable_tmpfs:
+            run_args += ["--tmpfs", "/tmp:rw,nosuid,nodev"]
+        if self._container_user:
+            run_args += ["--user", self._container_user]
 
         # 额外 mount
         for host_path, container_path in self._extra_mounts:
@@ -394,6 +426,13 @@ def create_runtime(
     repo_path: str | None = None,
     image: str = SANDBOX_IMAGE,
     network: bool = False,
+    pids_limit: int = DEFAULT_PIDS_LIMIT,
+    memory_limit: str = DEFAULT_MEMORY_LIMIT,
+    cpu_limit: str = DEFAULT_CPU_LIMIT,
+    no_new_privileges: bool = DEFAULT_NO_NEW_PRIVILEGES,
+    read_only_rootfs: bool = False,
+    writable_tmpfs: bool = False,
+    container_user: str | None = None,
 ) -> Runtime:
     """
     根据配置创建合适的 Runtime。
@@ -413,4 +452,15 @@ def create_runtime(
     if not repo_path:
         raise ValueError("repo_path is required when sandbox=True")
 
-    return DockerRuntime(repo_path=repo_path, image=image, network=network)
+    return DockerRuntime(
+        repo_path=repo_path,
+        image=image,
+        network=network,
+        pids_limit=pids_limit,
+        memory_limit=memory_limit,
+        cpu_limit=cpu_limit,
+        no_new_privileges=no_new_privileges,
+        read_only_rootfs=read_only_rootfs,
+        writable_tmpfs=writable_tmpfs,
+        container_user=container_user,
+    )

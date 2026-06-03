@@ -250,6 +250,7 @@ class StreamingMixin:
         messages: "list[LLMMessage]",
         tools: "list[LLMToolSchema]",
         on_text: StreamCallback | None = None,
+        on_thought: StreamCallback | None = None,
     ) -> "LLMResponse":
         """
         流式调用 LLM。
@@ -257,7 +258,8 @@ class StreamingMixin:
         Args:
             messages:  完整对话历史
             tools:     工具 schema 列表
-            on_text:   每收到一个 text chunk 时的回调，用于实时打印 thought
+            on_text:   每收到一个 text chunk 时的回调
+            on_thought: 推理过程回调；默认实现忽略它
 
         Returns:
             完整的 LLMResponse（流结束后才返回，与 complete() 格式一致）

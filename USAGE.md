@@ -15,11 +15,12 @@ Optional extras:
 ```bash
 pip install tiktoken
 pip install tree-sitter-javascript tree-sitter-typescript tree-sitter-go tree-sitter-rust tree-sitter-java
+pip install tree-sitter-c tree-sitter-cpp tree-sitter-ruby
 ```
 
-## Configure
+## Configure providers
 
-Edit `config/default.yaml` and set your provider/model. Provide API keys through environment variables.
+Edit `config/default.yaml` if you want to change provider or model defaults.
 
 Example:
 
@@ -31,26 +32,33 @@ llm:
   base_url: https://api.deepseek.com
 ```
 
-## Verify
-
-Smoke test:
+Common environment variables:
 
 ```bash
-python smoke_test.py
+export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
+export DEEPSEEK_API_KEY=...
+export GROQ_API_KEY=...
 ```
 
-Repository tests:
+Ollama uses a local server instead of an API key.
+
+## Run a basic task
 
 ```bash
-pytest -q
+agent run --repo /path/to/project --task "Fix the failing tests"
 ```
 
-## Chat Mode
+Run from a task file:
+
+```bash
+agent run --repo /path/to/project --task-file task.txt
+```
+
+## Chat mode
 
 ```bash
 agent chat --repo /path/to/project
-agent chat --repo /path/to/project --sandbox
-agent chat --repo /path/to/project --model gpt-4o --provider openai
 ```
 
 Built-in commands:
@@ -60,59 +68,115 @@ Built-in commands:
 - `/clear`
 - `/help`
 
-Use chat mode when you want multi-round context and iteration.
+## Streaming output
 
-## Run Mode
+Streaming is enabled by default in `run`.
 
 ```bash
-agent run --repo /path/to/project --task "Fix the failing tests"
-agent run --repo /path/to/project --task-file task.txt
-agent run --repo /path/to/project --task "..." --confirm
-agent run --repo /path/to/project --task "..." --sandbox
+agent run --repo /path/to/project --task "Investigate the failing test" --stream
 ```
 
-Use run mode for a single well-scoped task.
+## Docker sandbox mode
 
-## Recommended Task Style
+Use sandbox mode when you want containerized command execution:
 
-Good task prompts are concrete:
-
-```text
-src/parser.py 中的 parse() 在空字符串输入时抛出 ValueError。
-修复它，让它返回 None，并补上 tests/test_parser.py 的回归测试。
+```bash
+agent run --repo /path/to/project --task "run pytest" --sandbox
+agent chat --repo /path/to/project --sandbox
 ```
 
-Avoid vague prompts like:
+Notes:
 
-```text
-fix bug
+- Docker sandbox is demo-grade, not production container security.
+- If Docker is unavailable, sandboxed commands fail clearly instead of falling back to local execution.
+
+## Provider smoke tests
+
+Use the smoke harness for minimal provider-specific verification:
+
+```bash
+python scripts/smoke_provider.py --provider ollama --model llama3
+python scripts/smoke_provider.py --provider deepseek --model deepseek-chat
+python scripts/smoke_provider.py --provider anthropic --model claude-sonnet-4-5
 ```
 
-## Safety Notes
+Notes:
 
-- Local shell execution has basic guardrails only.
-- Commands with write risk, shell chaining, redirection, nested shells, or suspicious inline interpreters are treated as confirm-required.
-- `confirm-required` is a risk classification, not an automatic prompt. In `run` mode, manual confirmation happens only when `--confirm` is enabled; without it, the command may execute directly.
-- Use `--sandbox` when you need the stronger isolation boundary.
+- missing API keys produce a clear skip/configuration message
+- Ollama requires a running local server
 
-## Platform Notes
+## GitHub Issue dry-run demo
 
-- Local execution is POSIX-first.
-- On Windows, prefer `--sandbox` or WSL for more predictable behavior.
-- Pytest is configured to use `.pytest_tmp` inside the repo to avoid system temp permission issues on some Windows setups.
+Run the GitHub issue flow locally without creating a PR:
 
-## Logs
+```bash
+python -m entry.github_issue --repo owner/repo --issue 42 --local-path ./tmp/repo --dry-run
+python -m entry.github_issue --repo owner/repo --issue 42 --local-path ./tmp/repo --no-pr
+```
 
-List logs:
+Notes:
+
+- no diff means no PR
+- diff requires commit before push / PR
+- real PR creation depends on local git credentials and GitHub auth
+
+## Repo-map verification
+
+Run the repo-map verification suite:
+
+```bash
+pytest tests/test_day5.py -q
+pytest tests/test_repo_map_languages.py -q
+```
+
+Notes:
+
+- tree-sitter language packages are optional
+- when optional packages are missing, tests use fallback behavior or skip package-specific checks
+- `find_symbol` remains Python-only and is not documented as full multi-language search
+
+## Event log replay
+
+List available logs:
 
 ```bash
 agent log list
 ```
 
-Show one log:
+Show audit summary:
 
 ```bash
 agent log show logs/<task_id>_<timestamp>.jsonl
 ```
 
-Each run writes an append-only JSONL log with task start, actions, observations, reflections, and final status.
+Replay execution trace:
+
+```bash
+agent log replay logs/<task_id>_<timestamp>.jsonl
+```
+
+## Running tests
+
+Full test suite:
+
+```bash
+pytest -q
+```
+
+Selected verification commands:
+
+```bash
+pytest tests/test_stream.py -q
+pytest tests/test_sandbox.py -q
+pytest tests/test_provider_matrix.py -q
+pytest tests/test_event_replay.py -q
+```
+
+## Troubleshooting
+
+- Local shell guardrails are heuristic. Use `--sandbox` when you want a stronger boundary.
+- Docker sandbox behavior depends on Docker being installed and running.
+- Real provider smoke depends on API keys or local Ollama.
+- Event replay is an execution trace, not deterministic re-execution.
+- Windows is supported, but POSIX shell semantics may differ from native Windows shells.
+- Pytest uses `.pytest_tmp` inside the repo to reduce Windows temp-directory issues.

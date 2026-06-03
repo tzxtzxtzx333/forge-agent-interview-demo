@@ -221,3 +221,229 @@ def summarize_run(log: EventLog) -> dict:
             stats["final_status"] = event.event_type.value
 
     return stats
+
+
+def build_execution_trace(log: EventLog) -> dict:
+    events = log.replay()
+
+    trace = {
+        "task_id": log._current_task_id,
+        "description": None,
+        "repo_path": None,
+        "issue_url": None,
+        "provider": "unknown",
+        "model": "unknown",
+        "start_time": events[0].timestamp if events else None,
+        "end_time": events[-1].timestamp if events else None,
+        "duration_seconds": None,
+        "tool_calls": [],
+        "tool_results": [],
+        "modified_files": [],
+        "test_runs": [],
+        "final_status": None,
+        "final_summary": None,
+        "final_error": None,
+        "steps": 0,
+    }
+
+    modified_files: set[str] = set()
+    seen_test_runs: set[tuple[str, str]] = set()
+
+    for event in events:
+        payload = event.payload or {}
+
+        if event.event_type == EventType.TASK_START:
+            task_payload = payload.get("task", {})
+            trace["task_id"] = task_payload.get("task_id", trace["task_id"])
+            trace["description"] = task_payload.get("description")
+            trace["repo_path"] = task_payload.get("repo_path")
+            trace["issue_url"] = task_payload.get("issue_url")
+            meta = payload.get("meta", {})
+            trace["provider"] = meta.get("provider", trace["provider"])
+            trace["model"] = meta.get("model", trace["model"])
+
+        elif event.event_type == EventType.ACTION:
+            step = payload.get("step", 0)
+            trace["steps"] = max(trace["steps"], step)
+            action = payload.get("action", {})
+            tool_call = action.get("tool_call")
+            if tool_call:
+                call = {
+                    "step": step,
+                    "tool": tool_call.get("name"),
+                    "params": tool_call.get("params", {}),
+                    "thought": action.get("thought", ""),
+                    "timestamp": event.timestamp,
+                }
+                trace["tool_calls"].append(call)
+                modified_files.update(_extract_modified_files_from_tool_call(call["tool"], call["params"]))
+
+        elif event.event_type == EventType.OBSERVATION:
+            step = payload.get("step", 0)
+            trace["steps"] = max(trace["steps"], step)
+            observation = payload.get("observation", {})
+            tool_name = observation.get("tool_name", "")
+            output = observation.get("output", "")
+            result = {
+                "step": step,
+                "tool": tool_name,
+                "status": observation.get("status"),
+                "error": observation.get("error"),
+                "output_preview": _preview_output(output),
+                "timestamp": event.timestamp,
+            }
+            trace["tool_results"].append(result)
+            modified_files.update(_extract_modified_files_from_observation(tool_name, output))
+
+            test_run = _extract_test_run(tool_name, output, observation.get("status"), observation.get("error"))
+            if test_run is not None:
+                key = (test_run["tool"], test_run["summary"])
+                if key not in seen_test_runs:
+                    seen_test_runs.add(key)
+                    trace["test_runs"].append(test_run)
+
+        elif event.event_type == EventType.TASK_COMPLETE:
+            trace["final_status"] = event.event_type.value
+            trace["steps"] = max(trace["steps"], payload.get("steps", 0))
+            trace["final_summary"] = payload.get("summary")
+        elif event.event_type == EventType.TASK_FAILED:
+            trace["final_status"] = event.event_type.value
+            trace["steps"] = max(trace["steps"], payload.get("steps", 0))
+            trace["final_error"] = payload.get("reason")
+
+    trace["modified_files"] = sorted(modified_files)
+
+    if trace["start_time"] and trace["end_time"]:
+        try:
+            start = datetime.fromisoformat(trace["start_time"])
+            end = datetime.fromisoformat(trace["end_time"])
+            trace["duration_seconds"] = max(0.0, (end - start).total_seconds())
+        except ValueError:
+            trace["duration_seconds"] = None
+
+    return trace
+
+
+def render_replay_lines(log: EventLog) -> list[str]:
+    trace = build_execution_trace(log)
+    events = log.replay()
+    lines = [
+        f"[TASK] {trace['task_id']}",
+        f"Start   : {trace['start_time'] or 'unknown'}",
+        f"End     : {trace['end_time'] or 'unknown'}",
+        f"Provider: {trace['provider']}",
+        f"Model   : {trace['model']}",
+    ]
+    if trace["description"]:
+        lines.append(f"Task    : {trace['description']}")
+    if trace["repo_path"]:
+        lines.append(f"Repo    : {trace['repo_path']}")
+    lines.append("")
+
+    for event in events:
+        payload = event.payload or {}
+        if event.event_type == EventType.ACTION:
+            action = payload.get("action", {})
+            step = payload.get("step", "?")
+            tool_call = action.get("tool_call")
+            lines.append(f"[STEP {step}] {action.get('action_type', 'action')}")
+            if action.get("thought"):
+                lines.append(f"  Thought: {action['thought'][:200]}")
+            if tool_call:
+                lines.append(f"  Tool   : {tool_call.get('name')}")
+                params = tool_call.get("params", {})
+                if params:
+                    lines.append(f"  Params : {params}")
+        elif event.event_type == EventType.OBSERVATION:
+            observation = payload.get("observation", {})
+            status = observation.get("status", "unknown")
+            tool = observation.get("tool_name", "unknown")
+            prefix = "[OK]" if status == "success" else "[ERROR]"
+            lines.append(f"{prefix} [{tool}]")
+            preview = _preview_output(observation.get("output", ""))
+            for line in preview.splitlines():
+                lines.append(f"  {line}")
+            if observation.get("error"):
+                lines.append(f"  Error  : {observation['error']}")
+        elif event.event_type == EventType.REFLECTION:
+            lines.append(f"[WARN] Reflection: {payload.get('reason', '')}")
+        elif event.event_type == EventType.TASK_COMPLETE:
+            lines.append(f"[OK] Final: {payload.get('summary', '')}")
+        elif event.event_type == EventType.TASK_FAILED:
+            lines.append(f"[ERROR] Final: {payload.get('reason', '')}")
+
+    if trace["modified_files"]:
+        lines.append("")
+        lines.append("Modified files:")
+        for path in trace["modified_files"]:
+            lines.append(f"  - {path}")
+
+    if trace["test_runs"]:
+        lines.append("")
+        lines.append("Test runs:")
+        for test_run in trace["test_runs"]:
+            lines.append(f"  - [{test_run['tool']}] {test_run['summary']}")
+
+    return lines
+
+
+def _preview_output(output: str, max_lines: int = 5, max_chars: int = 400) -> str:
+    if not output:
+        return ""
+    lines = output.splitlines()[:max_lines]
+    preview = "\n".join(lines)
+    if len(preview) > max_chars:
+        preview = preview[:max_chars] + " ..."
+    return preview
+
+
+def _extract_modified_files_from_tool_call(tool_name: str | None, params: dict) -> set[str]:
+    if not tool_name:
+        return set()
+    if tool_name == "file_write":
+        path = params.get("path")
+        return {str(path)} if path else set()
+    if tool_name == "git_add":
+        paths = params.get("paths") or []
+        return {str(path) for path in paths if path and path != "."}
+    if tool_name == "git_diff":
+        path = params.get("path")
+        return {str(path)} if path else set()
+    return set()
+
+
+def _extract_modified_files_from_observation(tool_name: str, output: str) -> set[str]:
+    paths: set[str] = set()
+    if tool_name == "file_write":
+        for match in output.splitlines():
+            if "path=" in match:
+                paths.add(match.split("path=", 1)[1].strip())
+    if tool_name.startswith("git"):
+        for line in output.splitlines():
+            if line.startswith("+++ b/"):
+                paths.add(line[6:].strip())
+            elif line.startswith("diff --git "):
+                parts = line.split()
+                if len(parts) >= 4 and parts[3].startswith("b/"):
+                    paths.add(parts[3][2:])
+    return paths
+
+
+def _extract_test_run(tool_name: str, output: str, status: str | None, error: str | None) -> dict | None:
+    lowered = output.lower()
+    if tool_name == "test" or "pytest" in lowered or "passed" in lowered or "failed" in lowered:
+        summary = _extract_test_summary(output) or error or "test execution recorded"
+        return {
+            "tool": tool_name or "unknown",
+            "status": status or "unknown",
+            "summary": summary,
+        }
+    return None
+
+
+def _extract_test_summary(output: str) -> str | None:
+    for line in reversed(output.splitlines()):
+        stripped = line.strip()
+        if any(token in stripped for token in ("passed", "failed", "error", "skipped", "no tests")):
+            return stripped
+    return None

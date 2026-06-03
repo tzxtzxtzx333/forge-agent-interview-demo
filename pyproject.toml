@@ -31,6 +31,9 @@ full = [
     "tree-sitter-go>=0.22.0",
     "tree-sitter-rust>=0.22.0",
     "tree-sitter-java>=0.22.0",
+    "tree-sitter-c>=0.22.0",
+    "tree-sitter-cpp>=0.22.0",
+    "tree-sitter-ruby>=0.22.0",
 ]
 
 [project.scripts]

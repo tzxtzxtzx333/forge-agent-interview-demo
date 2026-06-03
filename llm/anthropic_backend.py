@@ -230,11 +230,13 @@ def _anthropic_stream(
     messages: list,
     tools: list,
     on_text: StreamCallback | None = None,
+    on_thought: StreamCallback | None = None,
 ) -> LLMResponse:
     """
     Anthropic 流式调用实现。
     用 anthropic SDK 的 stream() context manager，
     边收 text_delta 边调用 on_text 回调实时打印。
+    on_thought 仅为接口兼容保留，当前安全忽略。
     """
     # 提取 system prompt
     system_content = ""

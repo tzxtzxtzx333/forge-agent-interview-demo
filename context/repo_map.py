@@ -49,6 +49,19 @@ _LANG_REGISTRY: dict[str, tuple[str, str]] = {
     ".rb":  ("tree_sitter_ruby",       "language"),
 }
 
+_LANGUAGE_NAMES: dict[str, str] = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".rb": "ruby",
+}
+
 # AST 节点类型 → symbol kind 映射（各语言通用名）
 _FUNC_NODES: frozenset[str] = frozenset({
     "function_definition",       # Python, Go, C, C++
@@ -65,6 +78,18 @@ _CLASS_NODES: frozenset[str] = frozenset({
     "struct_item",        # Rust struct
     "impl_item",          # Rust impl
     "interface_declaration",  # TS/Java
+    "type_definition",    # Go type
+    "struct_specifier",   # C/C++
+})
+
+_METHOD_LIKE_PARENTS: frozenset[str] = frozenset({
+    "class_body",
+    "class_definition",
+    "class_declaration",
+    "impl_item",
+    "impl_block",
+    "declaration_list",
+    "field_declaration_list",
 })
 
 # 跳过的目录
@@ -73,12 +98,7 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     ".mypy_cache", ".pytest_cache", "dist", "build",
 })
 
-# 正则 fallback：匹配常见语言的定义语句
-_SYMBOL_RE = re.compile(
-    r"^[ \t]*(def|class|function|func|fn|pub fn|async fn|async def"
-    r"|public|private|protected|static)\s+(\w+)",
-    re.MULTILINE,
-)
+_SUPPORTED_EXTS: frozenset[str] = frozenset(_LANG_REGISTRY)
 
 # 已加载的 tree-sitter Language 对象缓存（避免重复 import）
 _lang_cache: dict[str, object] = {}   # ext → Language or None
@@ -122,6 +142,7 @@ class Symbol:
     kind: str           # "function" | "class" | "method"
     line: int
     file: Path
+    language: str
     indent: int = 0
 
     @property
@@ -198,7 +219,7 @@ class RepoMap:
             fi = FileInfo(path=path.relative_to(self._root), size=size)
             ext = path.suffix.lower()
 
-            if ext in _LANG_REGISTRY or ext in {".py", ".js", ".ts", ".go", ".rs"}:
+            if ext in _SUPPORTED_EXTS:
                 try:
                     content = path.read_text(encoding="utf-8", errors="replace")
                     fi.symbols = _extract_symbols(content, fi.path, ext)
@@ -234,52 +255,57 @@ def _extract_symbols(content: str, filepath: Path, ext: str) -> list[Symbol]:
     """
     lang = _get_language(ext)
     if lang is not None:
-        return _extract_with_treesitter(content, filepath, lang)
-    return _extract_symbols_regex(content, filepath)
+        return _extract_with_treesitter(content, filepath, lang, ext)
+    return _extract_symbols_regex(content, filepath, ext)
 
 
-def _extract_with_treesitter(content: str, filepath: Path, lang) -> list[Symbol]:
+def _extract_with_treesitter(content: str, filepath: Path, lang, ext: str) -> list[Symbol]:
     """用 tree-sitter 提取符号，失败时降级为正则。"""
     try:
         from tree_sitter import Parser
         parser = Parser(lang)
         tree = parser.parse(content.encode("utf-8", errors="replace"))
-        return _walk_tree(tree.root_node, filepath)
+        return _walk_tree(tree.root_node, filepath, ext)
     except Exception:
-        return _extract_symbols_regex(content, filepath)
+        return _extract_symbols_regex(content, filepath, ext)
 
 
-def _walk_tree(node, filepath: Path) -> list[Symbol]:
+def _walk_tree(node, filepath: Path, ext: str) -> list[Symbol]:
     """递归遍历 tree-sitter AST，提取函数和类定义。"""
     results: list[Symbol] = []
     ntype = node.type
+    language = _language_name(ext)
 
     if ntype in _FUNC_NODES and ntype != "arrow_function":
         name_node = node.child_by_field_name("name")
         if name_node:
             indent = node.start_point[1]
-            kind = "method" if indent > 0 else "function"
+            kind = "method" if _is_method_node(node) else "function"
             results.append(Symbol(
                 name=name_node.text.decode("utf-8", errors="replace"),
                 kind=kind,
                 line=node.start_point[0] + 1,
                 file=filepath,
+                language=language,
                 indent=indent,
             ))
     elif ntype in _CLASS_NODES:
         name_node = node.child_by_field_name("name")
+        if ntype == "struct_specifier" and name_node is None:
+            name_node = node.child_by_field_name("body")
         if name_node:
             indent = node.start_point[1]
             results.append(Symbol(
-                name=name_node.text.decode("utf-8", errors="replace"),
-                kind="class",
+                name=_clean_symbol_name(name_node.text.decode("utf-8", errors="replace")),
+                kind="class" if ntype != "interface_declaration" else "interface",
                 line=node.start_point[0] + 1,
                 file=filepath,
+                language=language,
                 indent=indent,
             ))
 
     for child in node.children:
-        results.extend(_walk_tree(child, filepath))
+        results.extend(_walk_tree(child, filepath, ext))
 
     return results
 
@@ -290,27 +316,113 @@ def _extract_python_symbols(content: str, filepath: Path) -> list[Symbol]:
     return _extract_symbols(content, filepath, ".py")
 
 
-def _extract_symbols_regex(content: str, filepath: Path) -> list[Symbol]:
+def _extract_symbols_regex(content: str, filepath: Path, ext: str | None = None) -> list[Symbol]:
     """正则 fallback，支持多语言。"""
     symbols: list[Symbol] = []
+    language = _language_name(ext or filepath.suffix.lower())
     for lineno, line in enumerate(content.splitlines(), start=1):
-        m = _SYMBOL_RE.match(line)
-        if not m:
-            continue
-        keyword = m.group(1)
-        name = m.group(2)
-        # 跳过 Java/JS 修饰符误匹配（public/private 后面跟的是类型，不是名字）
-        if keyword in ("public", "private", "protected", "static"):
-            continue
         indent = len(line) - len(line.lstrip())
-        if keyword == "class":
-            kind = "class"
-        elif indent > 0:
+        stripped = line.strip()
+        match = _match_symbol_regex(stripped, language)
+        if match is None:
+            continue
+        kind, name = match
+        if kind == "function" and indent > 0 and language in {"python", "ruby", "rust", "cpp"}:
             kind = "method"
-        else:
-            kind = "function"
+        if kind == "function" and language == "cpp" and "::" in stripped:
+            kind = "method"
+        if kind == "method" and indent == 0 and language in {"java", "cpp", "ruby", "javascript", "typescript"}:
+            if not (language == "cpp" and "::" in stripped):
+                kind = "function"
         symbols.append(Symbol(
-            name=name, kind=kind, line=lineno,
-            file=filepath, indent=indent,
+            name=name,
+            kind=kind,
+            line=lineno,
+            file=filepath,
+            language=language,
+            indent=indent,
         ))
     return symbols
+
+
+def _language_name(ext: str) -> str:
+    return _LANGUAGE_NAMES.get(ext.lower(), ext.lstrip(".").lower() or "text")
+
+
+def _clean_symbol_name(name: str) -> str:
+    return name.strip().strip("{}").strip()
+
+
+def _is_method_node(node) -> bool:
+    parent = getattr(node, "parent", None)
+    while parent is not None:
+        if parent.type in _METHOD_LIKE_PARENTS:
+            return True
+        if parent.type in {"module", "program", "source_file"}:
+            return False
+        parent = parent.parent
+    return node.start_point[1] > 0
+
+
+def _match_symbol_regex(line: str, language: str) -> tuple[str, str] | None:
+    patterns = _REGEX_PATTERNS.get(language, _REGEX_PATTERNS["default"])
+    for pattern, kind in patterns:
+        match = pattern.match(line)
+        if match:
+            name = match.groupdict().get("method") or match.group("name")
+            return kind, name
+    return None
+
+
+_REGEX_PATTERNS: dict[str, list[tuple[re.Pattern[str], str]]] = {
+    "python": [
+        (re.compile(r"^(?:async\s+def|def)\s+(?P<name>[A-Za-z_]\w*)\s*\("), "function"),
+        (re.compile(r"^class\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+    ],
+    "javascript": [
+        (re.compile(r"^function\s+(?P<name>[A-Za-z_]\w*)\s*\("), "function"),
+        (re.compile(r"^class\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+        (re.compile(r"^(?:async\s+)?(?P<name>[A-Za-z_]\w*)\s*\([^;]*\)\s*\{"), "method"),
+    ],
+    "typescript": [
+        (re.compile(r"^function\s+(?P<name>[A-Za-z_]\w*)\s*\("), "function"),
+        (re.compile(r"^class\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+        (re.compile(r"^interface\s+(?P<name>[A-Za-z_]\w*)\b"), "interface"),
+        (re.compile(r"^(?:public|private|protected|static|async|\s)*\s*(?P<name>[A-Za-z_]\w*)\s*\([^;]*\)\s*(?::|\{)"), "method"),
+    ],
+    "tsx": [
+        (re.compile(r"^function\s+(?P<name>[A-Za-z_]\w*)\s*\("), "function"),
+        (re.compile(r"^class\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+        (re.compile(r"^interface\s+(?P<name>[A-Za-z_]\w*)\b"), "interface"),
+    ],
+    "go": [
+        (re.compile(r"^func\s+\([^)]+\)\s*(?P<name>[A-Za-z_]\w*)\s*\("), "method"),
+        (re.compile(r"^func\s+(?P<name>[A-Za-z_]\w*)\s*\("), "function"),
+        (re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s+(?:struct|interface)\b"), "class"),
+    ],
+    "rust": [
+        (re.compile(r"^(?:pub\s+)?fn\s+(?P<name>[A-Za-z_]\w*)\s*\("), "function"),
+        (re.compile(r"^(?:pub\s+)?struct\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+        (re.compile(r"^impl\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+    ],
+    "java": [
+        (re.compile(r"^(?:public\s+)?(?:class|interface)\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+        (re.compile(r"^(?:public|private|protected|static|final|abstract|\s)+[\w<>\[\]]+\s+(?P<name>[A-Za-z_]\w*)\s*\("), "method"),
+    ],
+    "c": [
+        (re.compile(r"^(?:static\s+)?(?:[\w\*]+\s+)+(?P<name>[A-Za-z_]\w*)\s*\([^;]*\)\s*\{?"), "function"),
+    ],
+    "cpp": [
+        (re.compile(r"^class\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+        (re.compile(r"^(?:[\w:<>~]+\s+)+(?P<name>[A-Za-z_]\w*)::(?P<method>[A-Za-z_~]\w*)\s*\("), "method"),
+        (re.compile(r"^(?:[\w:<>~]+\s+)+(?P<name>[A-Za-z_~]\w*)\s*\("), "function"),
+    ],
+    "ruby": [
+        (re.compile(r"^class\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+        (re.compile(r"^def\s+(?P<name>[A-Za-z_]\w*[!?=]?)\b"), "method"),
+    ],
+    "default": [
+        (re.compile(r"^(?:async\s+def|def|function|func|fn)\s+(?P<name>[A-Za-z_]\w*)\b"), "function"),
+        (re.compile(r"^class\s+(?P<name>[A-Za-z_]\w*)\b"), "class"),
+    ],
+}

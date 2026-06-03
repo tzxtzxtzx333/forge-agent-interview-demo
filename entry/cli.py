@@ -170,6 +170,35 @@ def _print_step(event) -> None:
         click.echo(red(bold(f"\n[ERROR] FAILED: {payload.get('reason', '')}\n")))
 
 
+def _print_log_summary(path: Path) -> None:
+    from agent.event_log import EventLog, build_execution_trace, summarize_run
+
+    with EventLog.open_existing(path) as elog:
+        stats = summarize_run(elog)
+        trace = build_execution_trace(elog)
+
+    click.echo(bold(f"\nEvent Log: {path.name}"))
+    click.echo(f"  Task id      : {trace['task_id']}")
+    click.echo(f"  Start        : {trace['start_time'] or 'unknown'}")
+    click.echo(f"  End          : {trace['end_time'] or 'unknown'}")
+    click.echo(f"  Duration     : {trace['duration_seconds'] if trace['duration_seconds'] is not None else 'unknown'}")
+    click.echo(f"  Provider     : {trace['provider']}")
+    click.echo(f"  Model        : {trace['model']}")
+    click.echo(f"  Actions      : {stats['actions']}")
+    click.echo(f"  Reflections  : {stats['reflections']}")
+    click.echo(f"  Tool calls   : {stats['tool_calls']}")
+    click.echo(f"  Final status : {trace['final_status'] or stats['final_status']}")
+    if trace["final_summary"]:
+        click.echo(f"  Summary      : {trace['final_summary']}")
+    if trace["final_error"]:
+        click.echo(f"  Error        : {trace['final_error']}")
+    if trace["modified_files"]:
+        click.echo(f"  Modified     : {', '.join(trace['modified_files'])}")
+    if trace["test_runs"]:
+        click.echo(f"  Tests        : {', '.join(t['summary'] for t in trace['test_runs'])}")
+    click.echo()
+
+
 # ---------------------------------------------------------------------------
 # CLI 主命令组
 # ---------------------------------------------------------------------------
@@ -319,11 +348,15 @@ def run(
     with EventLog.create(task_obj, log_dir=config.agent.log_dir) as log:
         click.echo(dim(f"  Log: {log.path}\n"))
         result = agent.run(task_obj, log)
-        # 打印所有 events
-        for event in log.replay():
-            _print_step(event)
+        # 非流式模式保留完整 event replay；流式模式避免重复展示
+        if not stream:
+            for event in log.replay():
+                _print_step(event)
 
     elapsed = time.time() - t0
+
+    if stream:
+        click.echo()
 
     # 打印结果
     click.echo(bold("-" * 60))
@@ -332,6 +365,8 @@ def run(
     click.echo(f"Steps   : {result.steps_taken}")
     click.echo(f"Tokens  : {result.total_tokens:,}")
     click.echo(f"Time    : {elapsed:.1f}s")
+    if result.summary:
+        click.echo(f"Summary : {result.summary}")
     if result.error:
         click.echo(red(f"[ERROR] {result.error}"))
     click.echo(bold("-" * 60) + "\n")
@@ -509,7 +544,19 @@ def log() -> None:
 @click.argument("log_file")
 def log_show(log_file: str) -> None:
     """Show a summary of an event log file."""
-    from agent.event_log import EventLog, summarize_run
+    path = Path(log_file)
+    if not path.exists():
+        click.echo(red(f"[ERROR] File not found: {path}"), err=True)
+        sys.exit(1)
+
+    _print_log_summary(path)
+
+
+@log.command("replay")
+@click.argument("log_file")
+def log_replay(log_file: str) -> None:
+    """Replay an event log as an execution trace."""
+    from agent.event_log import EventLog, render_replay_lines
 
     path = Path(log_file)
     if not path.exists():
@@ -517,34 +564,20 @@ def log_show(log_file: str) -> None:
         sys.exit(1)
 
     with EventLog.open_existing(path) as elog:
-        events = elog.replay()
-        stats = summarize_run(elog)
+        lines = render_replay_lines(elog)
 
-    click.echo(bold(f"\nEvent Log: {path.name}"))
-    click.echo(f"  Total events : {stats['total_events']}")
-    click.echo(f"  Actions      : {stats['actions']}")
-    click.echo(f"  Reflections  : {stats['reflections']}")
-    click.echo(f"  Tool calls   : {stats['tool_calls']}")
-    click.echo(f"  Final status : {stats['final_status']}\n")
-
-    click.echo(bold("Events:"))
-    for event in events:
-        ts = event.timestamp[11:19]   # HH:MM:SS
-        etype = event.event_type.value
-        detail = ""
-        if event.event_type.value == "action":
-            tc = event.payload.get("action", {}).get("tool_call")
-            detail = f"  tool={tc['name']}" if tc else ""
-        elif event.event_type.value == "observation":
-            obs = event.payload.get("observation", {})
-            detail = f"  status={obs.get('status')}"
-        click.echo(f"  {ts}  {etype:<16}{detail}")
+    click.echo()
+    for line in lines:
+        click.echo(line)
+    click.echo()
 
 
 @log.command("list")
 @click.option("--dir", "log_dir", default="./logs", help="Log directory")
 def log_list(log_dir: str) -> None:
     """List all event log files."""
+    from agent.event_log import EventLog, build_execution_trace
+
     log_path = Path(log_dir)
     if not log_path.exists():
         click.echo(f"Log directory not found: {log_path}")
@@ -558,7 +591,14 @@ def log_list(log_dir: str) -> None:
     click.echo(bold(f"\nLog files in {log_path}:\n"))
     for f in files:
         size_kb = f.stat().st_size / 1024
-        click.echo(f"  {f.name}  ({size_kb:.1f} KB)")
+        final_status = "unknown"
+        try:
+            with EventLog.open_existing(f) as elog:
+                trace = build_execution_trace(elog)
+            final_status = trace["final_status"] or "unknown"
+        except Exception:
+            final_status = "unknown"
+        click.echo(f"  {f.name}  ({size_kb:.1f} KB)  status={final_status}")
     click.echo()
 
 
