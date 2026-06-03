@@ -1,230 +1,158 @@
 # Forge Agent
 
-## 项目概览
+一句话介绍：
+Forge Agent 是一个面向代码仓库的终端原生 AI Coding Agent 工程化 MVP，支持仓库理解、工具调用、文件修改、测试驱动修复、多模型 Provider 路由、Docker 演示级运行环境、GitHub Issue-to-patch 演示流程、轻量级 repo-map 上下文提取以及可回放的 JSONL 执行轨迹。
 
-Forge Agent 是一个面向终端的 AI 编程智能体 MVP，能够检查代码仓库、调用工具、编辑文件、运行测试、在多个 LLM provider 之间切换、执行 demo-grade 的沙箱命令、处理 GitHub Issue、构建轻量级仓库上下文，并生成可回放的 JSONL 执行轨迹。
+## 项目定位
 
-这个项目采用更适合简历展示的包装方式，但仍然坚持 claims-backed 原则：强调可验证的实现、可直接运行的命令，以及明确写清楚的能力边界，而不是空泛的产品化承诺。
+本项目不是单纯的聊天机器人，而是一个围绕“代码仓库自动化修改与验证”构建的工程化 coding agent。它通过 ReAct-style 执行循环，将模型推理、工具调用、文件编辑、命令执行、测试反馈和事件日志串联起来，使 agent 的执行过程可观察、可验证、可复盘。
 
-## 当前项目支持的能力
+强调几点：
 
-- 基于 ReAct 风格的编程循环，可探索仓库、调用工具、反思并完成任务
-- 仓库边界内的文件读写
-- shell、pytest 和 git 工具执行
-- `run` 与 `chat` 模式下的流式输出
-- Anthropic、OpenAI、DeepSeek、Groq、Ollama 多 provider 路由
-- demo-grade Docker 沙箱执行
-- GitHub Issue 到本地修复 / commit / PR 的 demo 流程
-- 多语言 repo-map 符号提取
-- 追加写入式 JSONL event log 与可回放执行轨迹
-- Windows-safe 的 ASCII CLI 输出
+- 面向真实代码仓库，而不是孤立的代码片段。
+- 以工具调用和测试反馈驱动代码修改。
+- 支持多模型后端切换。
+- 支持演示级 sandbox 和 GitHub Issue 处理流程。
+- 通过测试矩阵和执行日志增强可信度。
 
-## Engineering Evidence
+## 核心能力
 
-| Capability | Implementation | Verification |
-|---|---|---|
-| ReAct-style coding loop | `agent/core.py`, `agent/task.py` | `pytest tests/test_day2.py tests/test_day7.py -q` |
-| Repo-scoped file editing | `tools/file_tool.py` | `pytest tests/test_file_tool_repo_boundary.py -q` |
-| Shell / pytest / git tool execution | `tools/shell_tool.py`, `tools/test_tool.py`, `tools/git_tool.py` | `pytest tests/test_day3.py tests/test_sandbox.py -q` |
-| Streaming CLI output | `entry/cli.py`, `agent/core.py`, `llm/openai_compat.py`, `llm/anthropic_backend.py` | `pytest tests/test_stream.py -q` |
-| Multi-provider routing | `llm/router.py`, `llm/provider_matrix.py`, `scripts/smoke_provider.py` | `pytest tests/test_day4.py tests/test_provider_matrix.py -q` |
-| Demo-grade Docker runtime | `tools/runtime.py` | `pytest tests/test_sandbox.py -q` |
-| GitHub Issue-to-patch demo flow | `entry/github_issue.py` | `pytest tests/test_day6.py tests/test_github_issue_flow.py -q` |
-| Multi-language repo-map | `context/repo_map.py` | `pytest tests/test_day5.py tests/test_repo_map_languages.py -q` |
-| Event log replay / auditability | `agent/event_log.py`, `entry/cli.py` | `pytest tests/test_event_replay.py -q` |
-| Windows-safe CLI behavior | `entry/cli.py`, CLI scripts | `pytest -q` and `python -m entry.cli --help` |
+1. ReAct-style Coding Loop
+
+   - 支持任务输入、模型决策、工具调用、observation 回写、测试反馈和终止状态管理。
+   - 相关实现文件：`agent/core.py`、`agent/task.py`、`agent/prompt.py`
+
+2. 仓库级文件操作
+
+   - 支持在目标 repo 范围内读取、写入和编辑文件。
+   - 强调 repo-scoped，不是无限制的文件系统访问。
+   - 相关实现文件：`tools/file_tool.py`
+
+3. Shell / Pytest / Git 工具执行
+
+   - 支持命令执行、测试运行、diff 查看、commit 等 coding agent 常用操作。
+   - 相关实现文件：`tools/shell_tool.py`、`tools/test_tool.py`、`tools/git_tool.py`
+
+4. 流式 CLI 交互
+
+   - 支持 `run` / `chat` 模式下的流式输出，提升终端交互体验。
+   - 相关实现文件：`entry/cli.py`、`agent/core.py`
+
+5. 多模型 Provider 路由
+
+   - 支持 Anthropic 和 OpenAI-compatible provider，覆盖 OpenAI、DeepSeek、Groq、Ollama 等后端接入方式。
+   - 相关实现文件：`llm/router.py`、`llm/provider_matrix.py`、`llm/openai_compat.py`、`llm/anthropic_backend.py`
+
+6. Docker 演示级运行环境
+
+   - 采用 demo-grade Docker runtime。
+   - 支持容器内命令执行、仓库挂载、默认网络策略和基础资源边界。
+   - 不把它表述为 production-grade security sandbox。
+   - 相关实现文件：`tools/runtime.py`
+
+7. GitHub Issue-to-patch 演示流程
+
+   - 支持从 GitHub Issue 读取任务，运行 agent，生成本地修改，并在具备本地 GitHub 认证时创建 commit / PR。
+   - 不将其表述为 unattended production automation。
+   - 相关实现文件：`entry/github_issue.py`
+
+8. 轻量级 repo-map
+
+   - 采用 lightweight multi-language symbol extraction。
+   - 支持从多语言项目中提取符号与结构摘要，用作 prompt context。
+   - 不将其表述为 full semantic code intelligence。
+   - 相关实现文件：`context/repo_map.py`
+
+9. JSONL 执行日志与回放
+
+   - 支持 action / observation / event 的追加式日志记录，并可用于回放执行轨迹。
+   - replay 的定位是执行轨迹复盘，不是完全确定性的重新执行。
+   - 相关实现文件：`agent/event_log.py`
+
+10. Windows-safe CLI
+
+   - 对 Windows 终端输出、命令帮助和 CLI 入口做了兼容性验证。
+
+## 工程证据
+
+| 能力 | 相关实现 | 验证方式 |
+| -- | ---- | ---- |
+| ReAct 执行循环 | `agent/core.py`, `agent/task.py`, `agent/prompt.py` | `pytest tests/test_day2.py tests/test_day7.py -q` |
+| 仓库级文件边界 | `tools/file_tool.py` | `pytest tests/test_file_tool_repo_boundary.py -q` |
+| Shell / Pytest / Git 工具 | `tools/shell_tool.py`, `tools/test_tool.py`, `tools/git_tool.py` | `pytest tests/test_day3.py tests/test_sandbox.py -q` |
+| 流式 CLI | `entry/cli.py`, `agent/core.py` | `pytest tests/test_stream.py -q` |
+| 多 Provider 路由 | `llm/router.py`, `llm/provider_matrix.py` | `pytest tests/test_day4.py tests/test_provider_matrix.py -q` |
+| Provider smoke check | `llm/provider_smoke.py`, `scripts/smoke_provider.py`, `docs/providers.md` | `python scripts/smoke_provider.py --help` |
+| Docker 演示运行环境 | `tools/runtime.py` | `pytest tests/test_sandbox.py -q` |
+| GitHub Issue 流程 | `entry/github_issue.py` | `pytest tests/test_day6.py tests/test_github_issue_flow.py -q` |
+| 多语言 repo-map | `context/repo_map.py` | `pytest tests/test_day5.py tests/test_repo_map_languages.py -q` |
+| JSONL event replay | `agent/event_log.py`, `entry/cli.py` | `pytest tests/test_event_replay.py -q` |
 
 ## 快速开始
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/tzxtzxtzx333/forge-agent-interview-demo.git
 cd forge-agent-interview-demo
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-可选依赖：
+Windows PowerShell 示例：
 
-```bash
-pip install tiktoken
-pip install tree-sitter-javascript tree-sitter-typescript tree-sitter-go tree-sitter-rust tree-sitter-java
-pip install tree-sitter-c tree-sitter-cpp tree-sitter-ruby
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
 ```
 
-Provider 配置通过环境变量完成，示例：
+## Provider 配置
+
+可以通过环境变量配置模型后端，例如：
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxx
-# 或者 ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY
+export OPENAI_API_KEY=sk-xxx
+export ANTHROPIC_API_KEY=sk-xxx
+export GROQ_API_KEY=sk-xxx
 ```
 
-运行一个基础任务：
+Windows PowerShell 示例：
+
+```powershell
+$env:DEEPSEEK_API_KEY="sk-xxx"
+```
+
+## 运行示例
 
 ```bash
 agent run --repo . --task "Fix the failing tests"
 ```
 
-## 核心架构
-
-```text
-entry (cli/chat/github issue)
-  -> agent core
-  -> llm backend / router
-  -> tool registry + runtime
-  -> context helpers
-  -> event log / replay
-```
-
-关键文件：
-
-- `agent/core.py`：ReAct 循环
-- `agent/event_log.py`：追加写入式 JSONL event log 与执行轨迹辅助能力
-- `llm/router.py`：provider 选择
-- `tools/`：文件、shell、test、git 与 runtime 层
-- `context/repo_map.py`：仓库摘要与符号提取
-
-## Provider 支持
-
-当前支持的路由目标：
-
-- Anthropic
-- OpenAI
-- DeepSeek
-- Groq
-- Ollama
-
-对应的验证材料：
-
-- `tests/test_day4.py`
-- `tests/test_provider_matrix.py`
-- `scripts/smoke_provider.py`
-- [docs/providers.md](docs/providers.md)
-
-可使用 smoke harness 做环境相关验证：
-
 ```bash
-python scripts/smoke_provider.py --provider ollama --model llama3
-python scripts/smoke_provider.py --provider deepseek --model deepseek-chat
+python -m entry.cli --help
+python -m entry.github_issue --help
+python scripts/smoke_provider.py --help
 ```
 
-## Docker 沙箱
-
-这里的 Docker runtime 被定义为 demo-grade 执行边界，用于受控命令运行。
-
-对应的实现与验证：
-
-- `tools/runtime.py`
-- `tests/test_sandbox.py`
-
-验证命令：
-
-```bash
-pytest tests/test_sandbox.py -q
-```
-
-边界说明：
-
-- 本地 shell guardrails 属于启发式防护
-- Docker 沙箱默认启用例如 `--network none` 这样的稳定限制
-- 更高级别的隔离保证不在本项目范围内
-
-## GitHub Issue -> PR Demo Flow
-
-GitHub 入口被设计为一个 Issue-to-patch demo flow，用于把一个已跟踪的 Issue 转成一次本地修复、commit，以及可选的 PR 交付。
-
-对应的实现与验证：
-
-- `entry/github_issue.py`
-- `tests/test_day6.py`
-- `tests/test_github_issue_flow.py`
-
-验证命令：
-
-```bash
-pytest tests/test_day6.py tests/test_github_issue_flow.py -q
-python -m entry.github_issue --repo owner/repo --issue 42 --local-path ./tmp/repo --dry-run
-```
-
-说明：
-
-- 没有 diff 就不会 push，也不会创建 PR
-- 有 diff 时需要 `git add` 与 `git commit`
-- 实际 push / PR 创建依赖本地 git 凭据与 GitHub 认证
-
-## Repo-map
-
-Repo-map 是面向提示上下文的轻量级多语言符号提取，不是完整语义级代码理解。
-
-对应的实现与验证：
-
-- `context/repo_map.py`
-- `tests/test_day5.py`
-- `tests/test_repo_map_languages.py`
-
-验证命令：
-
-```bash
-pytest tests/test_day5.py tests/test_repo_map_languages.py -q
-```
-
-当前通过 fixture 验证的语言：
-
-- Python
-- JavaScript
-- TypeScript
-- Go
-- Rust
-- Java
-- C
-- C++
-- Ruby
-
-`tools/find_symbol` 仍然只是 Python-only 的正则辅助工具，并没有被表述为完整的多语言符号搜索。
-
-## Event Log / Replay
-
-每次运行都会写入追加式 JSONL 日志，并且可以回放为一条执行轨迹。
-
-对应的实现与验证：
-
-- `agent/event_log.py`
-- `tests/test_day1.py`
-- `tests/test_event_replay.py`
-- `entry/cli.py`
-
-验证命令：
-
-```bash
-pytest tests/test_event_replay.py -q
-agent log show logs/<task_id>_<timestamp>.jsonl
-agent log replay logs/<task_id>_<timestamp>.jsonl
-```
-
-Replay 的定位是用于审计的 execution trace，不是 deterministic re-execution。
-
-## 测试与验证
-
-主要验证命令：
+## 验证命令
 
 ```bash
 pytest -q
-python scripts/smoke_provider.py --help
 python -m entry.cli --help
-python -m entry.cli log --help
+python -m entry.github_issue --help
+python scripts/smoke_provider.py --help
 ```
 
-当前工作区的 baseline 验证方式：
+## 项目边界
 
-- 运行 `pytest -q` 来确认当前 baseline。具体的 pass / skip 数字可能会因为可选依赖与本地环境而变化。
+- 本项目定位为工程化 MVP，而不是生产级商业系统。
+- Docker runtime 是 demo-grade 运行环境，不等同于生产级安全沙箱。
+- GitHub PR 创建依赖本地 GitHub 凭据和认证状态。
+- repo-map 是轻量级符号提取与上下文摘要，不是完整语义级代码理解系统。
+- event replay 用于执行轨迹复盘，不保证完全确定性的重执行。
+- 多 Provider 能力依赖对应 API Key、网络环境和第三方服务可用性。
 
-Pytest 临时文件使用 repo 外、系统 temp 外的专用用户可写 temp 根目录，并由 pytest 为每次运行管理独立子目录，以避免 Windows 下的清理冲突。
+## 简历表述参考
 
-日常使用说明见 [USAGE.md](USAGE.md)。
-
-## Scope & Boundaries
-
-- 这是一个面向工程验证的 MVP，重点是可运行的 agent 工作流与可验证的命令路径。
-- Docker runtime 是 demo-grade，不应被理解为 production-grade 的安全沙箱。
-- GitHub PR 创建依赖本地 git 凭据与 GitHub 认证。
-- Repo-map 是面向提示上下文的轻量级符号提取，不是完整语义级代码理解。
+Forge Agent 是一个面向代码仓库的 AI Coding Agent 工程化项目，围绕 ReAct 执行循环实现模型推理、工具调用、文件修改、测试反馈和事件日志记录。项目支持 repo-scoped 文件操作、Shell/Pytest/Git 工具执行、多模型 Provider 路由、流式 CLI、Docker 演示运行环境、GitHub Issue-to-patch 演示流程、轻量级 repo-map 和 JSONL 轨迹回放，并通过自动化测试覆盖 provider routing、repo boundary、sandbox、repo-map、event replay 和 GitHub flow 等关键模块。
