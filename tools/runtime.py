@@ -47,6 +47,9 @@ def is_docker_available(timeout: int = 10) -> bool:
         check = subprocess.run(
             ["docker", "info"],
             capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         return check.returncode == 0
@@ -149,6 +152,8 @@ class LocalRuntime(Runtime):
                 shell=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 cwd=cwd,
             )
@@ -286,6 +291,8 @@ class DockerRuntime(Runtime):
                 docker_cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout + 5,   # docker exec 本身有少量开销
             )
             return RunResult(
@@ -310,7 +317,11 @@ class DockerRuntime(Runtime):
         try:
             subprocess.run(
                 ["docker", "rm", "-f", self._container_id],
-                capture_output=True, timeout=15,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
             )
         except Exception as e:
             logger.warning("Failed to remove container %s: %s", self._container_id, e)
@@ -379,6 +390,8 @@ class DockerRuntime(Runtime):
                 run_args,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=60,  # 拉镜像可能需要时间
             )
         except subprocess.TimeoutExpired:

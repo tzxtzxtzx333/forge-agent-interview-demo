@@ -49,7 +49,11 @@ def registry() -> ToolRegistry:
 
 @pytest.fixture
 def log(tmp_path, task) -> EventLog:
-    return EventLog.create(task, log_dir=str(tmp_path / "logs"))
+    log_obj = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+    try:
+        yield log_obj
+    finally:
+        log_obj.close()
 
 
 def make_agent(backend, registry=None, config=None) -> Agent:

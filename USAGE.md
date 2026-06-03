@@ -4,7 +4,7 @@
 
 ```bash
 git clone <repo-url>
-cd forge-agent
+cd forge-agent-interview-demo
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -179,4 +179,4 @@ pytest tests/test_event_replay.py -q
 - Real provider smoke depends on API keys or local Ollama.
 - Event replay is an execution trace, not deterministic re-execution.
 - Windows is supported, but POSIX shell semantics may differ from native Windows shells.
-- Pytest uses `.pytest_tmp` inside the repo to reduce Windows temp-directory issues.
+- Pytest temp files use a dedicated user-writable temp root outside the repo, with per-run subdirectories to avoid fixed temp-directory cleanup collisions and system temp-directory permission issues on Windows.

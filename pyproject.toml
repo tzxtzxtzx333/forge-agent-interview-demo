@@ -46,7 +46,7 @@ include = ["agent*", "llm*", "tools*", "context*", "entry*", "config*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-v --tb=short --basetemp=.pytest_tmp"
+addopts = "-v --tb=short"
 
 [tool.coverage.run]
 source = ["agent", "llm", "tools", "context", "entry"]

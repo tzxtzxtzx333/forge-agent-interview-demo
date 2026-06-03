@@ -39,7 +39,7 @@ This project is not positioned as a Claude Code replacement and it is not docume
 
 ```bash
 git clone <repo-url>
-cd forge-agent
+cd forge-agent-interview-demo
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -100,7 +100,7 @@ Provider verification is backed by:
 - `tests/test_day4.py`
 - `tests/test_provider_matrix.py`
 - `scripts/smoke_provider.py`
-- [docs/providers.md](/C:/Users/DELL/Desktop/forge-agent-main/docs/providers.md)
+- [docs/providers.md](docs/providers.md)
 
 Use the smoke harness for environment-specific checks:
 
@@ -226,13 +226,13 @@ python -m entry.cli --help
 python -m entry.cli log --help
 ```
 
-Current baseline verified in this workspace:
+Latest local verification in this workspace:
 
 - `pytest -q` -> `468 passed, 18 skipped`
 
-`pyproject.toml` fixes `--basetemp=.pytest_tmp` to reduce Windows temp-directory issues.
+Pytest temp files use a dedicated user-writable temp root outside the repo and outside the system temp directory, with pytest-managed per-run subdirectories to avoid Windows cleanup collisions.
 
-For day-to-day operation details, see [USAGE.md](/C:/Users/DELL/Desktop/forge-agent-main/USAGE.md).
+For day-to-day operation details, see [USAGE.md](USAGE.md).
 
 ## Upstream / Attribution
 
