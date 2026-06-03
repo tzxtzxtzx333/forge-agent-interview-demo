@@ -228,7 +228,7 @@ python -m entry.cli log --help
 
 Latest local verification in this workspace:
 
-- `pytest -q` -> `468 passed, 18 skipped`
+- Run `pytest -q` to verify the current baseline. Exact pass/skip counts may vary depending on optional dependencies and local environment.
 
 Pytest temp files use a dedicated user-writable temp root outside the repo and outside the system temp directory, with pytest-managed per-run subdirectories to avoid Windows cleanup collisions.
 
